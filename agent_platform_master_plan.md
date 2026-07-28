@@ -20,6 +20,8 @@ Prove that the multi-agent orchestration loop works end to end without memory, h
 - LLM final reviewer
 - Sequential subtask execution
 - Per-subtask retry loop
+- Bounded final-writing revision loop
+- Bounded supervisor-driven replanning
 - Escalation on unrecoverable failure
 - Successful end-user workflow test
 - Ambiguous-request escalation test
@@ -32,9 +34,8 @@ START
 → initialise_task
 → supervisor_plan
 → execute_specialists
-→ aggregate_results
 → final_review
-→ return_response / escalate
+→ return_response / prepare_final_retry / prepare_replan / escalate
 → END
 ```
 
@@ -45,7 +46,7 @@ START
 → pick_next_subtask
 → specialist agent
 → review_agent
-→ mark_subtask_complete / retry_subtask / mark_subtask_failed / escalate_current_subtask
+→ mark_subtask_complete / retry_subtask / request_replan / mark_subtask_failed / escalate_current_subtask
 → pick_next_subtask or END
 ```
 
@@ -111,6 +112,7 @@ Uses:
 - user request
 - current writing subtask
 - passed upstream specialist context from non-writing agents
+- final-review revision feedback, when retrying
 
 It must not use previous writing outputs.
 
@@ -141,9 +143,13 @@ It returns:
     "passed": bool,
     "score": float,
     "issues": list[str],
-    "action": "pass" | "retry" | "reassign" | "escalate",
+    "action": "pass" | "retry" | "replan" | "escalate",
 }
 ```
+
+`replan` returns control to the supervisor with the reviewer issues. The
+supervisor creates a corrected plan, clears stale plan results, and executes the
+replacement plan. Replanning is bounded.
 
 #### Final reviewer
 
@@ -159,6 +165,10 @@ It returns:
     "action": "return" | "retry" | "replan" | "escalate",
 }
 ```
+
+`retry` reopens only the final passed writing subtask and supplies the review
+issues as revision feedback. `replan` returns the issues to the supervisor.
+Both loops are bounded and escalate when their limits are exhausted.
 
 ## Phase 2 — Persistence and Checkpointing
 
@@ -320,4 +330,3 @@ end-user full workflow success
 end-user full workflow escalation
 final_answer only exists on completed workflows
 ```
-

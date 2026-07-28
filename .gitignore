@@ -8,6 +8,7 @@ env/
 __pycache__/
 *.py[cod]
 *$py.class
+*.egg-info/
 
 # Jupyter
 .ipynb_checkpoints/
@@ -18,6 +19,7 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
+tests/runs/
 
 # OS and editor files
 .DS_Store
