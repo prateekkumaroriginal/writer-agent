@@ -19,8 +19,10 @@ def initialise_task(state: SupervisorState) -> SupervisorState:
     """Create a clean workflow state with bounded recovery counters."""
     return {
         "task_id": str(uuid4()),
+        "thread_id": state.get("thread_id", ""),
         "user_id": state.get("user_id"),
         "user_request": state.get("user_request", ""),
+        "run_metadata": dict(state.get("run_metadata", {})),
         "status": "initialised",
         "error": None,
         "plan": "",

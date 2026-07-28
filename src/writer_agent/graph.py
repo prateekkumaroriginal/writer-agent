@@ -1,5 +1,8 @@
 """LangGraph assembly for the writer workflow."""
 
+from collections.abc import Sequence
+
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 
 from writer_agent.parent_nodes import (
@@ -79,8 +82,13 @@ def build_specialist_graph():
     return builder.compile()
 
 
-def build_supervisor_graph():
-    """Build the parent graph that plans, executes, reviews, and returns work."""
+def build_supervisor_graph(
+    checkpointer: BaseCheckpointSaver | None = None,
+    *,
+    interrupt_before: Sequence[str] | None = None,
+    interrupt_after: Sequence[str] | None = None,
+):
+    """Build the parent graph, optionally with persistence and interrupts."""
     builder = StateGraph(SupervisorState)
     builder.add_node("initialise_task", initialise_task)
     builder.add_node("supervisor_plan", supervisor_plan)
@@ -131,4 +139,8 @@ def build_supervisor_graph():
     builder.add_edge("prepare_replan", "supervisor_plan")
     builder.add_edge("return_response", END)
     builder.add_edge("escalate", END)
-    return builder.compile()
+    return builder.compile(
+        checkpointer=checkpointer,
+        interrupt_before=list(interrupt_before) if interrupt_before else None,
+        interrupt_after=list(interrupt_after) if interrupt_after else None,
+    )

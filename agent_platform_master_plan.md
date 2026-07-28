@@ -178,6 +178,21 @@ Make workflows resumable and inspectable.
 
 This phase adds durable execution state, not long-term semantic memory.
 
+### Implemented
+
+- Checkpointer injection in the supervisor graph builder
+- Postgres-backed production runtime with automatic schema setup
+- Local Docker Postgres service with persistent storage and health checks
+- Required thread/session IDs
+- Resume from the latest checkpoint
+- Latest-state and checkpoint-history inspection
+- Per-run metadata in workflow state and checkpoint configuration
+- Protection against accidental reuse of an existing thread for a new request
+- Deterministic interrupt/resume and process-restart persistence tests
+- Real Postgres cross-connection resume integration test
+
+Postgres is the sole checkpoint backend for local and deployed workflows.
+
 ### Important distinction
 
 Checkpointing is not memory.
@@ -186,7 +201,7 @@ Checkpointing stores workflow state so a graph run can be resumed or inspected.
 
 Long-term memory stores reusable facts, preferences, or project knowledge across runs.
 
-### Add
+### Original scope
 
 - LangGraph checkpointer
 - thread/session IDs
@@ -321,9 +336,11 @@ It was intentionally excluded from Phase 1.
 
 ## Immediate Next Step
 
-Move to Phase 2 with a minimal checkpointing implementation.
+Phase 2 is complete. Run the live Groq/Tavily workflow with Postgres
+checkpointing when an external-provider validation is desired, then begin
+Phase 3 long-term memory design.
 
-Before doing that, keep the following final Phase 1 checks passing:
+Keep the following Phase 1 invariants passing:
 
 ```text
 end-user full workflow success

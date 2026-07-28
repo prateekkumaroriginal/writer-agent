@@ -66,8 +66,10 @@ class FinalReview(TypedDict):
 
 class SupervisorState(TypedDict, total=False):
     task_id: str
+    thread_id: str
     user_id: str
     user_request: str
+    run_metadata: dict[str, Any]
 
     status: WorkflowStatus
     error: str | None

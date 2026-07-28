@@ -1,76 +1,82 @@
 # Writer Agent
 
-A LangGraph prototype that plans a request, executes sequential research, data,
-and writing subtasks, reviews each result, and returns or escalates the final
-response.
+Writer Agent is a multi-agent research and writing workflow built with
+LangGraph. It turns a user request into a reviewed final response by planning
+the work, gathering information, analysing it, producing a draft, and checking
+the result before returning it.
 
-The reusable implementation lives in `src/writer_agent`. The original
-`phase-1.ipynb` remains as an experiment and record of the first end-to-end run.
+The project currently includes:
+
+- supervisor-led task planning
+- research, data-analysis, and writing agents
+- specialist and final-output review
+- bounded retries and replanning
+- resumable workflows backed by PostgreSQL
+
+## Requirements
+
+- Python 3.11 or newer
+- Docker with Docker Compose
+- a Groq API key
+- a Tavily API key
 
 ## Setup
 
-Create and activate a virtual environment, then install the package:
+Create a virtual environment and install the project:
 
 ```bash
+python3 -m venv venv
+source venv/bin/activate
+python -m pip install --upgrade pip
 python -m pip install -e .
 ```
 
-Add the provider credentials to `.env`:
+Create the environment file:
 
-```dotenv
-GROQ_API_KEY=...
-TAVILY_API_KEY=...
+```bash
+cp .env.example .env
 ```
 
-## Usage
+Add your provider credentials to `.env`:
+
+```dotenv
+GROQ_API_KEY=your_groq_api_key
+TAVILY_API_KEY=your_tavily_api_key
+DATABASE_URL=postgresql://writer_agent:writer_agent_dev@localhost:5432/writer_agent?sslmode=disable
+LANGGRAPH_STRICT_MSGPACK=true
+```
+
+Start PostgreSQL:
+
+```bash
+docker compose up -d --wait checkpoint-db
+```
+
+## Run
 
 ```python
-from writer_agent import build_supervisor_graph
+from writer_agent import PersistentWriterAgent
 
-graph = build_supervisor_graph()
-result = graph.invoke(
-    {
-        "user_id": "user_001",
-        "user_request": "Write an overview of retrieval-augmented generation.",
-    }
-)
+with PersistentWriterAgent() as agent:
+    result = agent.start(
+        "example-thread-001",
+        {
+            "user_id": "user_001",
+            "user_request": "Write an overview of retrieval-augmented generation.",
+        },
+    )
 
 print(result["status"])
 print(result["final_answer"])
 ```
 
-## Tests
+Use a new thread ID for each new request.
 
-The retry and replanning control paths use deterministic tests and do not call
-external providers:
-
-```bash
-PYTHONPATH=src python -m unittest discover -s tests -v
-```
-
-The live full-graph test uses the exact request “Write a report on Student
-Protest on Jantar Mantar” and requires Groq and Tavily credentials:
+## Stop PostgreSQL
 
 ```bash
-RUN_LIVE_TESTS=1 PYTHONPATH=src python -m unittest \
-  tests.test_full_graph_student_protest -v
+docker compose stop checkpoint-db
 ```
 
-The complete returned graph state is written to
-`tests/runs/student-protest-jantar-mantar.json`. The `tests/runs` directory is
-ignored by Git.
-
-## Package layout
-
-- `state.py`: workflow state and runtime types
-- `schemas.py`: structured LLM response models
-- `prompts.py`: agent system prompts
-- `search.py`: Tavily adapter
-- `helpers.py`: state and context-formatting helpers
-- `parent_nodes.py`: supervisor and final-review nodes
-- `specialist_nodes.py`: specialist execution and review nodes
-- `graph.py`: specialist and supervisor graph assembly
-
-The notebook records the original prototype. The package is the canonical
-implementation and now includes bounded final-writing retries and
-supervisor-driven replanning.
+The database volume is retained so workflows remain available after the
+container starts again.
