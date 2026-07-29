@@ -1,0 +1,17 @@
+[theme]
+base = "dark"
+primaryColor = "#9697FF"
+backgroundColor = "#0B0B0F"
+secondaryBackgroundColor = "#15151C"
+textColor = "#F0F0F5"
+borderColor = "#2D2D3A"
+baseRadius = "medium"
+buttonRadius = "medium"
+showWidgetBorder = true
+
+[server]
+headless = true
+runOnSave = true
+
+[browser]
+gatherUsageStats = false

@@ -18,6 +18,15 @@ FinalReviewAction: TypeAlias = Literal[
     "replan",
     "escalate",
 ]
+WorkflowEventKind: TypeAlias = Literal[
+    "plan",
+    "search",
+    "research",
+    "analysis",
+    "draft",
+    "review",
+    "replan",
+]
 WorkflowStatus: TypeAlias = Literal[
     "initialised",
     "planning",
@@ -64,6 +73,31 @@ class FinalReview(TypedDict):
     action: FinalReviewAction
 
 
+class WorkflowEvent(TypedDict, total=False):
+    id: str
+    kind: WorkflowEventKind
+    title: str
+    content: str
+    details: list[str]
+    decision: str
+
+
+def merge_workflow_events(
+    current: list[WorkflowEvent],
+    incoming: list[WorkflowEvent],
+) -> list[WorkflowEvent]:
+    """Append workflow events while preserving first-seen order by ID."""
+    merged: list[WorkflowEvent] = []
+    seen_ids: set[str] = set()
+    for event in [*current, *incoming]:
+        event_id = event.get("id")
+        if not event_id or event_id in seen_ids:
+            continue
+        seen_ids.add(event_id)
+        merged.append(event)
+    return merged
+
+
 class SupervisorState(TypedDict, total=False):
     task_id: str
     thread_id: str
@@ -83,6 +117,7 @@ class SupervisorState(TypedDict, total=False):
 
     review_reports: Annotated[list[ReviewReport], operator.add]
     final_review: FinalReview | None
+    workflow_events: Annotated[list[WorkflowEvent], merge_workflow_events]
 
     max_retries: int
     final_retry_count: int

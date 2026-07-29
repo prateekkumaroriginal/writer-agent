@@ -2,6 +2,7 @@
 
 import json
 import os
+import unicodedata
 import unittest
 from pathlib import Path
 
@@ -65,7 +66,9 @@ class StudentProtestFullGraphTest(unittest.TestCase):
         self.assertIsInstance(final_answer, str)
         self.assertGreaterEqual(len(final_answer.split()), 150)
 
-        normalized_answer = final_answer.casefold()
+        normalized_answer = " ".join(
+            unicodedata.normalize("NFKC", final_answer).casefold().split()
+        )
         for required_term in ("student", "protest", "jantar mantar"):
             self.assertIn(required_term, normalized_answer)
 

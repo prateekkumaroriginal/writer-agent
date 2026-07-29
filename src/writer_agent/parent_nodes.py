@@ -7,8 +7,10 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from writer_agent.helpers import all_subtasks_passed, build_runtime_subtasks
 from writer_agent.model import llm
 from writer_agent.prompts import FINAL_REVIEW_SYSTEM_PROMPT, SUPERVISOR_SYSTEM_PROMPT
+from writer_agent.provider_errors import raise_if_retryable_provider_error
 from writer_agent.schemas import FinalReviewSchema, SupervisorPlanSchema
 from writer_agent.state import FinalReview, SupervisorState
+from writer_agent.workflow_events import workflow_event
 
 DEFAULT_MAX_RETRIES = 2
 DEFAULT_MAX_FINAL_RETRIES = 2
@@ -32,6 +34,7 @@ def initialise_task(state: SupervisorState) -> SupervisorState:
         "subtask_results": {},
         "review_reports": [],
         "final_review": None,
+        "workflow_events": [],
         "max_retries": DEFAULT_MAX_RETRIES,
         "final_retry_count": 0,
         "max_final_retries": DEFAULT_MAX_FINAL_RETRIES,
@@ -82,6 +85,7 @@ Create a corrected plan that addresses this feedback.
         )
         runtime_subtasks = build_runtime_subtasks(plan.subtasks)
     except Exception as exc:
+        raise_if_retryable_provider_error(exc)
         return {
             "status": "failed",
             "error": f"Supervisor plan generation failed: {exc}",
@@ -109,6 +113,34 @@ Create a corrected plan that addresses this feedback.
         "replan_feedback": [],
         "escalation_reason": None,
         "final_answer": None,
+        "workflow_events": [
+            workflow_event(
+                "replan" if state.get("replan_count", 0) else "plan",
+                "Revised plan"
+                if state.get("replan_count", 0)
+                else "Initial plan",
+                content=plan.plan,
+                details=[
+                    *[
+                        f"Reviewer feedback: {issue}"
+                        for issue in replan_feedback
+                    ],
+                    *[
+                        (
+                            f"{index}. {subtask['agent_type'].title()}: "
+                            f"{subtask['objective']}\n"
+                            f"Expected output: {subtask['expected_output']}\n"
+                            "Review criteria: "
+                            + "; ".join(subtask["review_criteria"])
+                        )
+                        for index, subtask in enumerate(
+                            runtime_subtasks,
+                            start=1,
+                        )
+                    ],
+                ],
+            )
+        ],
     }
 
 
@@ -144,6 +176,48 @@ def get_latest_writing_content(state: SupervisorState) -> str | None:
     return result.get("output", {}).get("content")
 
 
+def _final_review_update(
+    review: FinalReview,
+    **updates: object,
+) -> SupervisorState:
+    """Return final-review state together with its safe audit artifact."""
+    action = review["action"]
+    title = {
+        "return": "Final review passed",
+        "retry": "Final review requested a rewrite",
+        "replan": "Final review requested replanning",
+        "escalate": "Final review could not approve the document",
+    }[action]
+    content = (
+        "The document met the final review criteria."
+        if review["passed"]
+        else "The document did not yet meet the final review criteria."
+    )
+    issues = [
+        issue
+        for issue in review.get("issues", [])
+        if not issue.startswith("Final review generation failed:")
+    ]
+    result: SupervisorState = {
+        "status": "reviewing",
+        "final_review": review,
+        "workflow_events": [
+            workflow_event(
+                "review",
+                title,
+                content=content,
+                details=[
+                    f"Score: {review['score']:.0%}",
+                    *issues,
+                ],
+                decision=action,
+            )
+        ],
+    }
+    result.update(updates)
+    return result
+
+
 def final_review(state: SupervisorState) -> SupervisorState:
     """Review final writing and enforce retry and replan limits."""
     final_review_llm = llm.with_structured_output(FinalReviewSchema)
@@ -160,12 +234,11 @@ def final_review(state: SupervisorState) -> SupervisorState:
             "issues": [f"These subtasks did not pass: {', '.join(incomplete)}"],
             "action": "escalate",
         }
-        return {
-            "status": "reviewing",
-            "final_review": review,
-            "escalation_reason": "Final review found incomplete subtasks.",
-            "final_answer": None,
-        }
+        return _final_review_update(
+            review,
+            escalation_reason="Final review found incomplete subtasks.",
+            final_answer=None,
+        )
 
     final_content = get_latest_writing_content(state)
     if not final_content:
@@ -175,12 +248,11 @@ def final_review(state: SupervisorState) -> SupervisorState:
             "issues": ["No writing content was available for final review."],
             "action": "escalate",
         }
-        return {
-            "status": "reviewing",
-            "final_review": review,
-            "escalation_reason": "Final review could not find writing content.",
-            "final_answer": None,
-        }
+        return _final_review_update(
+            review,
+            escalation_reason="Final review could not find writing content.",
+            final_answer=None,
+        )
 
     try:
         llm_review = final_review_llm.invoke(
@@ -196,20 +268,20 @@ def final_review(state: SupervisorState) -> SupervisorState:
             "action": llm_review.action,
         }
     except Exception as exc:
+        raise_if_retryable_provider_error(exc)
         review = {
             "passed": False,
             "score": 0.0,
             "issues": [f"Final review generation failed: {exc}"],
             "action": "escalate",
         }
-        return {
-            "status": "reviewing",
-            "final_review": review,
-            "escalation_reason": (
+        return _final_review_update(
+            review,
+            escalation_reason=(
                 "Final reviewer could not produce a valid decision."
             ),
-            "final_answer": None,
-        }
+            final_answer=None,
+        )
 
     if (
         review["action"] == "retry"
@@ -224,12 +296,11 @@ def final_review(state: SupervisorState) -> SupervisorState:
             ],
             "action": "escalate",
         }
-        return {
-            "status": "reviewing",
-            "final_review": review,
-            "escalation_reason": "Final writing failed after retries.",
-            "final_answer": None,
-        }
+        return _final_review_update(
+            review,
+            escalation_reason="Final writing failed after retries.",
+            final_answer=None,
+        )
 
     if (
         review["action"] == "replan"
@@ -243,14 +314,13 @@ def final_review(state: SupervisorState) -> SupervisorState:
             ],
             "action": "escalate",
         }
-        return {
-            "status": "reviewing",
-            "final_review": review,
-            "escalation_reason": "Workflow failed after replanning.",
-            "final_answer": None,
-        }
+        return _final_review_update(
+            review,
+            escalation_reason="Workflow failed after replanning.",
+            final_answer=None,
+        )
 
-    return {"status": "reviewing", "final_review": review}
+    return _final_review_update(review)
 
 
 def route_after_final_review(state: SupervisorState) -> str:

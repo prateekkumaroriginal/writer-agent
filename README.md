@@ -12,6 +12,9 @@ The project currently includes:
 - specialist and final-output review
 - bounded retries and replanning
 - resumable workflows backed by PostgreSQL
+- dark-only Streamlit product interface
+- rerun-safe background task execution
+- durable recent-task history and checkpoint resume
 
 ## Requirements
 
@@ -41,9 +44,11 @@ Add your provider credentials to `.env`:
 
 ```dotenv
 GROQ_API_KEY=your_groq_api_key
+GROQ_MODEL=openai/gpt-oss-120b
 TAVILY_API_KEY=your_tavily_api_key
 DATABASE_URL=postgresql://writer_agent:writer_agent_dev@localhost:5432/writer_agent?sslmode=disable
 LANGGRAPH_STRICT_MSGPACK=true
+WRITER_AGENT_USER_ID=local-user
 ```
 
 Start PostgreSQL:
@@ -52,7 +57,32 @@ Start PostgreSQL:
 docker compose up -d --wait checkpoint-db
 ```
 
-## Run
+## Run the Streamlit app
+
+```bash
+streamlit run streamlit_app.py
+```
+
+Open `http://localhost:8501`.
+
+The app:
+
+- accepts one substantial writing brief per task
+- creates an idempotent, durable background job
+- displays planning, research, analysis, writing, and review progress
+- keeps running independently of Streamlit page reruns
+- restores recent tasks from PostgreSQL
+- returns final content only when the workflow completes
+- exposes sources and a chronological workflow feed on demand
+- records meaningful plans, searches, specialist outputs, reviews, retries,
+  and replans without exposing hidden reasoning or operational internals
+- supports Markdown download and clipboard copy
+
+The UI uses the local Compose database URL by default. Set `DATABASE_URL` to
+override it. `WRITER_AGENT_USER_ID` is optional and defaults to `local-user`.
+`GROQ_MODEL` is optional and defaults to `openai/gpt-oss-120b`.
+
+## Python API
 
 ```python
 from writer_agent import PersistentWriterAgent
@@ -71,6 +101,42 @@ print(result["final_answer"])
 ```
 
 Use a new thread ID for each new request.
+
+## UI architecture
+
+```text
+Streamlit
+→ WriterAgentService
+→ Postgres task index + background runner
+→ PersistentWriterAgent
+→ LangGraph checkpoints
+```
+
+Streamlit stores only the selected task ID in session state. The task index is
+the UI source of truth, so reruns render persisted state instead of restarting
+the workflow. Each agent run owns its own Postgres checkpoint connection.
+
+## Test
+
+Run deterministic tests:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+Run Postgres integrations:
+
+```bash
+RUN_POSTGRES_TESTS=1 \
+DATABASE_URL=postgresql://writer_agent:writer_agent_dev@localhost:5432/writer_agent?sslmode=disable \
+python -m unittest discover -s tests -v
+```
+
+Live Groq/Tavily validation remains opt-in:
+
+```bash
+RUN_LIVE_TESTS=1 python -m unittest tests.test_full_graph_student_protest -v
+```
 
 ## Stop PostgreSQL
 

@@ -440,6 +440,15 @@ class FullGraphControlFlowTests(unittest.TestCase):
             result["final_answer"],
             "Revised draft with a stronger and complete conclusion.",
         )
+        titles = [event["title"] for event in result["workflow_events"]]
+        self.assertEqual(titles.count("Initial plan"), 1)
+        self.assertEqual(titles.count("Draft response"), 1)
+        self.assertEqual(titles.count("Revised draft"), 1)
+        self.assertEqual(
+            titles.count("Final review requested a rewrite"),
+            1,
+        )
+        self.assertEqual(titles.count("Final review passed"), 1)
 
     def test_specialist_replan_builds_corrected_plan_and_completes(self):
         """Verify specialist feedback triggers a successful supervisor replan."""
@@ -516,6 +525,9 @@ class FullGraphControlFlowTests(unittest.TestCase):
             result["final_answer"],
             "Corrected final response after supervisor replanning.",
         )
+        titles = [event["title"] for event in result["workflow_events"]]
+        self.assertEqual(titles.count("Initial plan"), 1)
+        self.assertEqual(titles.count("Revised plan"), 1)
 
     def test_final_reviewer_replan_builds_corrected_plan_and_completes(self):
         """Verify final-review feedback triggers a successful supervisor replan."""
@@ -601,6 +613,9 @@ class FullGraphControlFlowTests(unittest.TestCase):
             result["final_answer"],
             "A corrected response based on the replanned workflow.",
         )
+        titles = [event["title"] for event in result["workflow_events"]]
+        self.assertEqual(titles.count("Initial plan"), 1)
+        self.assertEqual(titles.count("Revised plan"), 1)
 
 
 if __name__ == "__main__":

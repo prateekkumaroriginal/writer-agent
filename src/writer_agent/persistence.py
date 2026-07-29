@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from os import getenv
 from typing import Any
@@ -93,6 +93,36 @@ class PersistentWriterAgent:
         }
         return self.graph.invoke(initial_state, config=config)
 
+    def start_stream(
+        self,
+        thread_id: str,
+        state: SupervisorState,
+        *,
+        on_state: Callable[[SupervisorState], object],
+        metadata: Mapping[str, Any] | None = None,
+    ) -> SupervisorState:
+        """Start a workflow and report checkpointed states as they are produced."""
+        config = thread_config(thread_id, metadata)
+        if self.graph.get_state(config).values:
+            raise ValueError(
+                f"Thread {thread_id!r} already exists; use resume() or a new ID."
+            )
+
+        run_metadata = {
+            "started_at": datetime.now(UTC).isoformat(),
+            **dict(metadata or {}),
+        }
+        initial_state: SupervisorState = {
+            **state,
+            "thread_id": thread_id.strip(),
+            "run_metadata": run_metadata,
+        }
+        return self._stream(
+            initial_state,
+            config=config,
+            on_state=on_state,
+        )
+
     def resume(
         self,
         thread_id: str,
@@ -106,6 +136,20 @@ class PersistentWriterAgent:
             raise KeyError(f"No checkpoints found for thread {thread_id!r}.")
         return self.graph.invoke(None, config=config)
 
+    def resume_stream(
+        self,
+        thread_id: str,
+        *,
+        on_state: Callable[[SupervisorState], object],
+        metadata: Mapping[str, Any] | None = None,
+    ) -> SupervisorState:
+        """Resume a workflow and report checkpointed states as they are produced."""
+        config = thread_config(thread_id, metadata)
+        snapshot = self.graph.get_state(config)
+        if not snapshot.values:
+            raise KeyError(f"No checkpoints found for thread {thread_id!r}.")
+        return self._stream(None, config=config, on_state=on_state)
+
     def get_state(self, thread_id: str) -> StateSnapshot:
         """Return the latest checkpoint snapshot for a thread."""
         return self.graph.get_state(thread_config(thread_id))
@@ -113,6 +157,28 @@ class PersistentWriterAgent:
     def get_history(self, thread_id: str) -> list[StateSnapshot]:
         """Return newest-first checkpoint history for a thread."""
         return list(self.graph.get_state_history(thread_config(thread_id)))
+
+    def _stream(
+        self,
+        input_state: SupervisorState | None,
+        *,
+        config: RunnableConfig,
+        on_state: Callable[[SupervisorState], object],
+    ) -> SupervisorState:
+        """Consume root and specialist state updates, then return durable state."""
+        for _, streamed_state in self.graph.stream(
+            input_state,
+            config=config,
+            stream_mode="values",
+            subgraphs=True,
+        ):
+            if isinstance(streamed_state, dict):
+                on_state(streamed_state)
+
+        snapshot = self.graph.get_state(config)
+        final_state = dict(snapshot.values)
+        on_state(final_state)
+        return final_state
 
     def close(self) -> None:
         """Close the Postgres connection owned by this runtime."""

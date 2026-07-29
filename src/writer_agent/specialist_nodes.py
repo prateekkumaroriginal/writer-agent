@@ -18,6 +18,7 @@ from writer_agent.prompts import (
     SEARCH_QUERY_SYSTEM_PROMPT,
     WRITING_SYSTEM_PROMPT,
 )
+from writer_agent.provider_errors import raise_if_retryable_provider_error
 from writer_agent.schemas import (
     DataResponseSchema,
     ResearchResponseSchema,
@@ -32,6 +33,7 @@ from writer_agent.state import (
     SubtaskResult,
     SupervisorState,
 )
+from writer_agent.workflow_events import workflow_event
 
 
 def pick_next_subtask(state: SupervisorState) -> SupervisorState:
@@ -110,6 +112,39 @@ Review criteria:
     return query
 
 
+def _review_workflow_event(
+    subtask: Subtask | None,
+    report: ReviewReport,
+):
+    """Translate a specialist decision into a user-safe audit event."""
+    specialist = (
+        {
+            "research": "Research",
+            "data": "Analysis",
+            "writing": "Draft",
+        }[subtask["agent_type"]]
+        if subtask
+        else "Specialist"
+    )
+    action = report["action"]
+    content = {
+        "pass": f"{specialist} passed specialist review.",
+        "retry": f"The reviewer requested another {specialist.lower()} attempt.",
+        "replan": "The reviewer requested a revised workflow plan.",
+        "escalate": f"{specialist} could not be approved.",
+    }[action]
+    return workflow_event(
+        "review",
+        f"{specialist} review",
+        content=content,
+        details=[
+            f"Score: {report['score']:.0%}",
+            *report.get("issues", []),
+        ],
+        decision=action,
+    )
+
+
 def research_agent(state: SupervisorState) -> SupervisorState:
     """Produce source-grounded research for the current subtask."""
     research_llm = llm.with_structured_output(ResearchResponseSchema)
@@ -120,9 +155,20 @@ def research_agent(state: SupervisorState) -> SupervisorState:
             "escalation_reason": "Missing current subtask.",
         }
 
-    query = build_search_query(state, subtask)
+    try:
+        query = build_search_query(state, subtask)
+    except Exception as exc:
+        raise_if_retryable_provider_error(exc)
+        raise
     print(f"SEARCH QUERY ({len(query)} chars):")
     print(query)
+    events = [
+        workflow_event(
+            "search",
+            "Web search",
+            content=query,
+        )
+    ]
 
     try:
         search_results = search_web(query)
@@ -170,7 +216,23 @@ Search results:
             ],
             "errors": [],
         }
+        events.append(
+            workflow_event(
+                "research",
+                "Research response",
+                content=response.summary,
+                details=[
+                    *[f"Finding: {item}" for item in response.findings],
+                    *[
+                        f"Uncertainty: {item}"
+                        for item in response.uncertainties
+                    ],
+                    f"Sources gathered: {len(search_results)}",
+                ],
+            )
+        )
     except Exception as exc:
+        raise_if_retryable_provider_error(exc)
         result = {
             "subtask_id": subtask["id"],
             "agent_type": "research",
@@ -184,7 +246,8 @@ Search results:
         "subtask_results": {
             **state.get("subtask_results", {}),
             subtask["id"]: result,
-        }
+        },
+        "workflow_events": events,
     }
 
 
@@ -224,7 +287,15 @@ Passed research context:
             "sources": [],
             "errors": [],
         }
+        events = [
+            workflow_event(
+                "analysis",
+                "Analysis response",
+                content=response.content,
+            )
+        ]
     except Exception as exc:
+        raise_if_retryable_provider_error(exc)
         result = {
             "subtask_id": subtask["id"],
             "agent_type": "data",
@@ -233,12 +304,14 @@ Passed research context:
             "sources": [],
             "errors": [f"Data agent generation failed: {exc}"],
         }
+        events = []
 
     return {
         "subtask_results": {
             **state.get("subtask_results", {}),
             subtask["id"]: result,
-        }
+        },
+        "workflow_events": events,
     }
 
 
@@ -288,7 +361,21 @@ Final-review revision feedback:
             "sources": [],
             "errors": [],
         }
+        events = [
+            workflow_event(
+                "draft",
+                "Revised draft" if revision_feedback else "Draft response",
+                content=response.content,
+                details=[
+                    *[
+                        f"Revision requested: {item}"
+                        for item in revision_feedback
+                    ]
+                ],
+            )
+        ]
     except Exception as exc:
+        raise_if_retryable_provider_error(exc)
         result = {
             "subtask_id": subtask["id"],
             "agent_type": "writing",
@@ -297,12 +384,14 @@ Final-review revision feedback:
             "sources": [],
             "errors": [f"Writing agent generation failed: {exc}"],
         }
+        events = []
 
     return {
         "subtask_results": {
             **state.get("subtask_results", {}),
             subtask["id"]: result,
-        }
+        },
+        "workflow_events": events,
     }
 
 
@@ -321,6 +410,7 @@ def review_agent(state: SupervisorState) -> SupervisorState:
         return {
             "status": "reviewing",
             "review_reports": [report],
+            "workflow_events": [_review_workflow_event(None, report)],
             "escalation_reason": "Reviewer could not find current subtask.",
         }
 
@@ -333,7 +423,13 @@ def review_agent(state: SupervisorState) -> SupervisorState:
             "issues": ["No result was produced for this subtask."],
             "action": "retry",
         }
-        return {"status": "reviewing", "review_reports": [report]}
+        return {
+            "status": "reviewing",
+            "review_reports": [report],
+            "workflow_events": [
+                _review_workflow_event(subtask, report)
+            ],
+        }
 
     try:
         decision = reviewer_llm.invoke(
@@ -358,6 +454,7 @@ Specialist result:
             "action": decision.action,
         }
     except Exception as exc:
+        raise_if_retryable_provider_error(exc)
         return {
             "status": "reviewing",
             "error": f"Reviewer generation failed: {exc}",
@@ -366,7 +463,11 @@ Specialist result:
             ),
         }
 
-    return {"status": "reviewing", "review_reports": [report]}
+    return {
+        "status": "reviewing",
+        "review_reports": [report],
+        "workflow_events": [_review_workflow_event(subtask, report)],
+    }
 
 
 def route_after_subtask_review(state: SupervisorState) -> str:
