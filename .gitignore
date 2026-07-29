@@ -21,6 +21,9 @@ __pycache__/
 htmlcov/
 tests/runs/
 
+# Local artifacts
+.htmls/
+
 # OS and editor files
 .DS_Store
 .vscode/
