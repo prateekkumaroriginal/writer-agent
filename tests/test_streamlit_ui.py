@@ -2,7 +2,7 @@
 
 import unittest
 from datetime import UTC, datetime
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from writer_agent.streamlit_ui import (
     APP_CSS,
@@ -95,6 +95,82 @@ class SidebarNavigationTests(unittest.TestCase):
             render_task_body(task, service=object())
 
         render_details.assert_called_once_with(task)
+
+    def test_escalated_try_again_uses_conversation_retry(self):
+        now = datetime.now(UTC)
+        task = TaskView(
+            id="task-2",
+            thread_id="thread-2",
+            user_id="local-user",
+            conversation_id="conversation-1",
+            parent_task_id="task-1",
+            turn_number=2,
+            title="Revision",
+            request="Remove the word count.",
+            status="escalated",
+            stage="attention",
+            status_message="Revision escalated.",
+            progress_current=5,
+            steps=steps_for_stage("attention"),
+            created_at=now,
+            updated_at=now,
+        )
+        service = Mock()
+
+        with (
+            patch("writer_agent.streamlit_ui.render_progress"),
+            patch("writer_agent.streamlit_ui.st.warning"),
+            patch("writer_agent.streamlit_ui.st.caption"),
+            patch(
+                "writer_agent.streamlit_ui.st.button",
+                return_value=True,
+            ),
+            patch(
+                "writer_agent.streamlit_ui._retry_task"
+            ) as retry_task,
+            patch("writer_agent.streamlit_ui._render_supporting_details"),
+            patch("writer_agent.streamlit_ui._render_version_history"),
+        ):
+            render_task_body(task, service=service)
+
+        retry_task.assert_called_once_with(service, task)
+
+    def test_interrupted_resume_continues_same_task(self):
+        now = datetime.now(UTC)
+        task = TaskView(
+            id="task-2",
+            thread_id="thread-2",
+            user_id="local-user",
+            conversation_id="conversation-1",
+            parent_task_id="task-1",
+            turn_number=2,
+            title="Revision",
+            request="Remove the word count.",
+            status="interrupted",
+            stage="attention",
+            status_message="Revision interrupted.",
+            progress_current=4,
+            steps=steps_for_stage("attention"),
+            can_resume=True,
+            created_at=now,
+            updated_at=now,
+        )
+        service = Mock()
+
+        with (
+            patch("writer_agent.streamlit_ui.render_progress"),
+            patch("writer_agent.streamlit_ui.st.warning"),
+            patch(
+                "writer_agent.streamlit_ui.st.button",
+                return_value=True,
+            ),
+            patch("writer_agent.streamlit_ui.st.rerun"),
+            patch("writer_agent.streamlit_ui._render_supporting_details"),
+            patch("writer_agent.streamlit_ui._render_version_history"),
+        ):
+            render_task_body(task, service=service)
+
+        service.resume_task.assert_called_once_with(task.id)
 
 
 if __name__ == "__main__":

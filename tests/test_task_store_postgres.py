@@ -73,6 +73,50 @@ class TaskStorePostgresTests(unittest.TestCase):
                 store.list_recent("task-store-integration", limit=1)[0].id,
                 task.id,
             )
+
+            follow_up, follow_up_created = store.create_follow_up(
+                parent_task_id=task.id,
+                user_id="task-store-integration",
+                request="Also include a concrete example.",
+                idempotency_key=f"{key}-follow-up",
+            )
+            self.assertTrue(follow_up_created)
+            self.assertEqual(follow_up.parent_task_id, task.id)
+            self.assertEqual(follow_up.conversation_id, task.conversation_id)
+            self.assertEqual(follow_up.turn_number, 2)
+            self.assertEqual(
+                [version.turn_number for version in store.list_versions(
+                    follow_up.id,
+                    user_id="task-store-integration",
+                )],
+                [1, 2],
+            )
+            self.assertEqual(
+                store.list_recent("task-store-integration", limit=1)[0].id,
+                follow_up.id,
+            )
+
+            store.mark_failed(follow_up.id)
+            retry, retry_created = store.create_retry(
+                task_id=follow_up.id,
+                user_id="task-store-integration",
+                idempotency_key=f"{key}-retry",
+            )
+            self.assertTrue(retry_created)
+            self.assertEqual(retry.parent_task_id, follow_up.id)
+            self.assertEqual(retry.request, follow_up.request)
+            self.assertEqual(retry.conversation_id, task.conversation_id)
+            self.assertEqual(retry.turn_number, 3)
+            self.assertEqual(
+                [
+                    version.turn_number
+                    for version in store.list_versions(
+                        retry.id,
+                        user_id="task-store-integration",
+                    )
+                ],
+                [1, 2, 3],
+            )
         finally:
             store.close()
             if task_id is not None:
@@ -81,7 +125,7 @@ class TaskStorePostgresTests(unittest.TestCase):
                     autocommit=True,
                 ) as connection:
                     connection.execute(
-                        "DELETE FROM writer_tasks WHERE id = %s",
+                        "DELETE FROM writer_tasks WHERE conversation_id = %s",
                         (task_id,),
                     )
 

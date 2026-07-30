@@ -101,6 +101,9 @@ class TaskView(BaseModel):
     id: str
     thread_id: str
     user_id: str
+    conversation_id: str = ""
+    parent_task_id: str | None = None
+    turn_number: int = Field(default=1, ge=1)
     title: str
     request: str
     status: TaskStatus
@@ -134,9 +137,23 @@ class TaskSummary(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     id: str
+    conversation_id: str = ""
+    turn_number: int = Field(default=1, ge=1)
     title: str
     status: TaskStatus
     stage: TaskStage
+    updated_at: datetime
+
+
+class TaskVersionSummary(BaseModel):
+    """One selectable answer version inside a conversation."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    turn_number: int = Field(ge=1)
+    request: str
+    status: TaskStatus
     updated_at: datetime
 
 

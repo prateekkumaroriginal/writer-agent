@@ -2,7 +2,12 @@
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from writer_agent.state import AgentType, FinalReviewAction, ReviewAction
+from writer_agent.state import (
+    AgentType,
+    FinalReviewAction,
+    ReviewAction,
+    RevisionIntent,
+)
 
 
 class PlannedSubtaskSchema(BaseModel):
@@ -57,6 +62,56 @@ class SupervisorPlanSchema(BaseModel):
             "The graph will run these in the given order."
         ),
     )
+
+
+class SupervisorRevisionPlanSchema(BaseModel):
+    """A bounded supervisor decision for one follow-up turn."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    plan: str = Field(
+        description="A concise plan for revising or answering from the prior run."
+    )
+    plan_confidence: float = Field(ge=0.0, le=1.0)
+    intent: RevisionIntent = Field(
+        description="The semantic relationship between the follow-up and prior run."
+    )
+    effective_request: str = Field(
+        min_length=10,
+        description=(
+            "A standalone request incorporating the original goal and the new "
+            "follow-up, suitable for specialist execution."
+        ),
+    )
+    reuse_research: bool = Field(
+        description="Whether passed research from the prior run remains valid."
+    )
+    reuse_data: bool = Field(
+        description="Whether passed analysis from the prior run remains valid."
+    )
+    reuse_previous_answer: bool = Field(
+        description="Whether the writer should revise the prior answer."
+    )
+    subtasks: list[PlannedSubtaskSchema] = Field(
+        min_length=1,
+        description=(
+            "Only the new specialist work required for this turn. The last "
+            "subtask must be writing so the turn returns a reviewed answer."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def validate_writing_is_final(self) -> "SupervisorRevisionPlanSchema":
+        if self.subtasks[-1].agent_type != "writing":
+            raise ValueError("A revision plan must end with a writing subtask.")
+        if any(
+            subtask.agent_type == "writing"
+            for subtask in self.subtasks[:-1]
+        ):
+            raise ValueError(
+                "A revision plan may only use writing as its final subtask."
+            )
+        return self
 
 
 class ReviewDecisionSchema(BaseModel):

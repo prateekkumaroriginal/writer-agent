@@ -234,32 +234,56 @@ For local experiments, a simpler checkpointer may be acceptable first.
 - parallel execution
 - dependency graphs
 
-## Phase 3 — Long-Term Memory
+## Phase 3A — Multi-Turn Iterations
+
+### Status
+
+Implemented.
 
 ### Goal
 
-Add durable memory only after the core workflow and checkpointing are stable.
+Allow users to revise or extend completed work inside one visible conversation
+without overwriting checkpoint history or blindly rerunning every specialist.
+
+### Implemented behavior
+
+- one durable conversation containing multiple immutable task runs
+- one new LangGraph checkpoint thread per follow-up
+- parent/child run linkage and ordered version history
+- supervisor initial, revision, and replan modes
+- standalone effective requests for follow-up execution
+- selective reuse of passed research and data artifacts
+- deterministic freshness and calculation guards
+- low-confidence revision fallback to fresh full planning
+- writing and final review for every revised user-facing answer
+- Streamlit follow-up input and version navigation
+- migration of existing tasks into one-turn conversations
+
+## Phase 3B — Long-Term Memory
+
+### Goal
+
+Add durable memory after checkpointing and multi-turn iteration are stable.
 
 ### Possible memory types
 
-- user preferences
-- project facts
-- organisation-specific context
-- past accepted outputs
-- recurring entities
-- domain notes
+- bounded core preferences considered for every writing task
+- contextual preferences and facts retrieved only when relevant
 
-### Possible storage
+### Planned storage
 
 - PostgreSQL tables for structured memory
-- pgvector or ChromaDB for semantic retrieval
+- pgvector for contextual semantic retrieval
 
 ### Rules
 
 - Do not inject all memory into every prompt.
 - Retrieve only relevant memory.
 - Keep memory separate from checkpointing.
-- Memory writes should be explicit and reviewable at first.
+- Save only durable user-provided facts and preferences.
+- Activate saved memories automatically for all of the user's writing.
+- Keep one-off revision instructions in conversation context, not memory.
+- Provide memory inspection, editing, and deletion as recovery controls.
 
 ## Phase 4 — Human-in-the-Loop
 
@@ -333,17 +357,3 @@ Support more complex workflows.
 This is where a `dependencies` field may make sense.
 
 It was intentionally excluded from Phase 1.
-
-## Immediate Next Step
-
-Phase 2 is complete. Run the live Groq/Tavily workflow with Postgres
-checkpointing when an external-provider validation is desired, then begin
-Phase 3 long-term memory design.
-
-Keep the following Phase 1 invariants passing:
-
-```text
-end-user full workflow success
-end-user full workflow escalation
-final_answer only exists on completed workflows
-```

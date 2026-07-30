@@ -20,6 +20,7 @@ from writer_agent.ui_models import (
     TaskStage,
     TaskStatus,
     TaskSummary,
+    TaskVersionSummary,
     TaskView,
     WorkflowEventView,
     jsonable_models,
@@ -33,6 +34,9 @@ CREATE TABLE IF NOT EXISTS writer_tasks (
     id UUID PRIMARY KEY,
     thread_id TEXT NOT NULL UNIQUE,
     user_id TEXT NOT NULL,
+    conversation_id UUID NOT NULL,
+    parent_task_id UUID,
+    turn_number INTEGER NOT NULL DEFAULT 1,
     idempotency_key TEXT NOT NULL,
     request TEXT NOT NULL,
     title TEXT NOT NULL,
@@ -62,6 +66,28 @@ ON writer_tasks (user_id, updated_at DESC);
 TASK_MIGRATION_SQL = """
 ALTER TABLE writer_tasks
 ADD COLUMN IF NOT EXISTS workflow_events JSONB NOT NULL DEFAULT '[]'::jsonb;
+
+ALTER TABLE writer_tasks
+ADD COLUMN IF NOT EXISTS conversation_id UUID;
+
+ALTER TABLE writer_tasks
+ADD COLUMN IF NOT EXISTS parent_task_id UUID;
+
+ALTER TABLE writer_tasks
+ADD COLUMN IF NOT EXISTS turn_number INTEGER NOT NULL DEFAULT 1;
+
+UPDATE writer_tasks
+SET conversation_id = id
+WHERE conversation_id IS NULL;
+
+ALTER TABLE writer_tasks
+ALTER COLUMN conversation_id SET NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS writer_tasks_conversation_turn_idx
+ON writer_tasks (conversation_id, turn_number);
+
+CREATE INDEX IF NOT EXISTS writer_tasks_conversation_idx
+ON writer_tasks (conversation_id, turn_number);
 """
 
 
@@ -101,17 +127,19 @@ class PostgresTaskStore:
         now = datetime.now(UTC)
         task_id = str(uuid4())
         thread_id = f"writer-{task_id}"
+        conversation_id = task_id
         steps = steps_for_stage("queued")
         with self._pool.connection() as connection:
             created = connection.execute(
                 """
                 INSERT INTO writer_tasks (
-                    id, thread_id, user_id, idempotency_key, request, title,
+                    id, thread_id, user_id, conversation_id, turn_number,
+                    idempotency_key, request, title,
                     status, stage, status_message, progress_current,
                     progress_total, steps, created_at, updated_at
                 )
                 VALUES (
-                    %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, 1, %s, %s, %s,
                     'queued', 'queued', 'Waiting to start…', 0,
                     5, %s, %s, %s
                 )
@@ -122,6 +150,7 @@ class PostgresTaskStore:
                     task_id,
                     thread_id,
                     user_id,
+                    conversation_id,
                     idempotency_key,
                     request,
                     title_from_request(request),
@@ -141,7 +170,210 @@ class PostgresTaskStore:
             ).fetchone()
         if existing is None:
             raise RuntimeError("Idempotent task lookup failed after conflict.")
+        if existing.get("parent_task_id") is not None:
+            raise ValueError(
+                "This idempotency key belongs to a conversation follow-up."
+            )
         return _task_from_row(existing), False
+
+    def create_follow_up(
+        self,
+        *,
+        parent_task_id: str,
+        user_id: str,
+        request: str,
+        idempotency_key: str,
+    ) -> tuple[TaskView, bool]:
+        """Append one queued run to the latest completed conversation turn."""
+        now = datetime.now(UTC)
+        task_id = str(uuid4())
+        thread_id = f"writer-{task_id}"
+        with self._pool.connection() as connection:
+            with connection.transaction():
+                parent = connection.execute(
+                    """
+                    SELECT * FROM writer_tasks
+                    WHERE id = %s AND user_id = %s
+                    FOR UPDATE
+                    """,
+                    (parent_task_id, user_id),
+                ).fetchone()
+                if parent is None:
+                    raise KeyError(
+                        f"No writing task found for {parent_task_id!r}."
+                    )
+                conversation_id = parent.get("conversation_id") or parent["id"]
+                latest = connection.execute(
+                    """
+                    SELECT * FROM writer_tasks
+                    WHERE conversation_id = %s AND user_id = %s
+                    ORDER BY turn_number DESC
+                    LIMIT 1
+                    FOR UPDATE
+                    """,
+                    (conversation_id, user_id),
+                ).fetchone()
+                if latest is None:
+                    raise RuntimeError("Conversation has no latest run.")
+
+                existing = connection.execute(
+                    """
+                    SELECT * FROM writer_tasks
+                    WHERE user_id = %s AND idempotency_key = %s
+                    """,
+                    (user_id, idempotency_key),
+                ).fetchone()
+                if existing is not None:
+                    if str(existing.get("parent_task_id")) != str(parent["id"]):
+                        raise ValueError(
+                            "This idempotency key belongs to another task."
+                        )
+                    return _task_from_row(existing), False
+
+                if str(latest["id"]) != str(parent["id"]):
+                    raise ValueError(
+                        "Follow-ups can only be added to the latest version."
+                    )
+                if latest["status"] != "completed":
+                    raise ValueError(
+                        "Wait for the current version to complete before "
+                        "adding a follow-up."
+                    )
+
+                created = connection.execute(
+                    """
+                    INSERT INTO writer_tasks (
+                        id, thread_id, user_id, conversation_id,
+                        parent_task_id, turn_number, idempotency_key,
+                        request, title, status, stage, status_message,
+                        progress_current, progress_total, steps,
+                        created_at, updated_at
+                    )
+                    VALUES (
+                        %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, 'queued', 'queued', 'Waiting to start…',
+                        0, 5, %s, %s, %s
+                    )
+                    RETURNING *
+                    """,
+                    (
+                        task_id,
+                        thread_id,
+                        user_id,
+                        conversation_id,
+                        parent["id"],
+                        int(parent.get("turn_number") or 1) + 1,
+                        idempotency_key,
+                        request,
+                        parent["title"],
+                        Jsonb(jsonable_models(steps_for_stage("queued"))),
+                        now,
+                        now,
+                    ),
+                ).fetchone()
+        if created is None:
+            raise RuntimeError("Follow-up creation did not return a task.")
+        return _task_from_row(created), True
+
+    def create_retry(
+        self,
+        *,
+        task_id: str,
+        user_id: str,
+        idempotency_key: str,
+    ) -> tuple[TaskView, bool]:
+        """Append a fresh run for the latest failed conversation turn."""
+        now = datetime.now(UTC)
+        retry_id = str(uuid4())
+        thread_id = f"writer-{retry_id}"
+        with self._pool.connection() as connection:
+            with connection.transaction():
+                failed_task = connection.execute(
+                    """
+                    SELECT * FROM writer_tasks
+                    WHERE id = %s AND user_id = %s
+                    FOR UPDATE
+                    """,
+                    (task_id, user_id),
+                ).fetchone()
+                if failed_task is None:
+                    raise KeyError(f"No writing task found for {task_id!r}.")
+
+                conversation_id = (
+                    failed_task.get("conversation_id") or failed_task["id"]
+                )
+                latest = connection.execute(
+                    """
+                    SELECT * FROM writer_tasks
+                    WHERE conversation_id = %s AND user_id = %s
+                    ORDER BY turn_number DESC
+                    LIMIT 1
+                    FOR UPDATE
+                    """,
+                    (conversation_id, user_id),
+                ).fetchone()
+                if latest is None:
+                    raise RuntimeError("Conversation has no latest run.")
+
+                existing = connection.execute(
+                    """
+                    SELECT * FROM writer_tasks
+                    WHERE user_id = %s AND idempotency_key = %s
+                    """,
+                    (user_id, idempotency_key),
+                ).fetchone()
+                if existing is not None:
+                    if str(existing.get("parent_task_id")) != str(
+                        failed_task["id"]
+                    ):
+                        raise ValueError(
+                            "This idempotency key belongs to another task."
+                        )
+                    return _task_from_row(existing), False
+
+                if str(latest["id"]) != str(failed_task["id"]):
+                    raise ValueError(
+                        "Only the latest conversation version can be retried."
+                    )
+                if failed_task["status"] not in {"escalated", "failed"}:
+                    raise ValueError(
+                        "Only a failed task can be tried again."
+                    )
+
+                created = connection.execute(
+                    """
+                    INSERT INTO writer_tasks (
+                        id, thread_id, user_id, conversation_id,
+                        parent_task_id, turn_number, idempotency_key,
+                        request, title, status, stage, status_message,
+                        progress_current, progress_total, steps,
+                        created_at, updated_at
+                    )
+                    VALUES (
+                        %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, 'queued', 'queued', 'Waiting to start…',
+                        0, 5, %s, %s, %s
+                    )
+                    RETURNING *
+                    """,
+                    (
+                        retry_id,
+                        thread_id,
+                        user_id,
+                        conversation_id,
+                        failed_task["id"],
+                        int(failed_task.get("turn_number") or 1) + 1,
+                        idempotency_key,
+                        failed_task["request"],
+                        failed_task["title"],
+                        Jsonb(jsonable_models(steps_for_stage("queued"))),
+                        now,
+                        now,
+                    ),
+                ).fetchone()
+        if created is None:
+            raise RuntimeError("Retry creation did not return a task.")
+        return _task_from_row(created), True
 
     def get(self, task_id: str, *, user_id: str | None = None) -> TaskView:
         """Return one task, optionally enforcing its owner."""
@@ -166,9 +398,16 @@ class PostgresTaskStore:
         with self._pool.connection() as connection:
             rows = connection.execute(
                 """
-                SELECT id, title, status, stage, updated_at
-                FROM writer_tasks
-                WHERE user_id = %s
+                SELECT id, conversation_id, turn_number, title, status, stage,
+                       updated_at
+                FROM (
+                    SELECT DISTINCT ON (conversation_id)
+                        id, conversation_id, turn_number, title, status, stage,
+                        updated_at
+                    FROM writer_tasks
+                    WHERE user_id = %s
+                    ORDER BY conversation_id, turn_number DESC
+                ) latest
                 ORDER BY updated_at DESC
                 LIMIT %s
                 """,
@@ -177,9 +416,48 @@ class PostgresTaskStore:
         return [
             TaskSummary(
                 id=str(row["id"]),
+                conversation_id=str(row["conversation_id"]),
+                turn_number=row["turn_number"],
                 title=row["title"],
                 status=row["status"],
                 stage=row["stage"],
+                updated_at=row["updated_at"],
+            )
+            for row in rows
+        ]
+
+    def list_versions(
+        self,
+        task_id: str,
+        *,
+        user_id: str,
+    ) -> list[TaskVersionSummary]:
+        """List all persisted turns for the task's conversation."""
+        with self._pool.connection() as connection:
+            task = connection.execute(
+                """
+                SELECT conversation_id FROM writer_tasks
+                WHERE id = %s AND user_id = %s
+                """,
+                (task_id, user_id),
+            ).fetchone()
+            if task is None:
+                raise KeyError(f"No writing task found for {task_id!r}.")
+            rows = connection.execute(
+                """
+                SELECT id, turn_number, request, status, updated_at
+                FROM writer_tasks
+                WHERE conversation_id = %s AND user_id = %s
+                ORDER BY turn_number
+                """,
+                (task["conversation_id"], user_id),
+            ).fetchall()
+        return [
+            TaskVersionSummary(
+                id=str(row["id"]),
+                turn_number=row["turn_number"],
+                request=row["request"],
+                status=row["status"],
                 updated_at=row["updated_at"],
             )
             for row in rows
@@ -385,6 +663,11 @@ def _task_from_row(row: Mapping[str, Any]) -> TaskView:
         id=str(row["id"]),
         thread_id=row["thread_id"],
         user_id=row["user_id"],
+        conversation_id=str(row.get("conversation_id") or row["id"]),
+        parent_task_id=(
+            str(row["parent_task_id"]) if row.get("parent_task_id") else None
+        ),
+        turn_number=int(row.get("turn_number") or 1),
         title=row["title"],
         request=row["request"],
         status=row["status"],

@@ -440,13 +440,18 @@ def _submit_brief(service: WriterAgentService, brief: str) -> None:
 
 
 def render_task_header(task: TaskView) -> None:
+    brief_label = (
+        f"Follow-up · Version {task.turn_number}"
+        if task.turn_number > 1
+        else "Your brief"
+    )
     st.html(
         f"""
         <header class="wa-task-header">
           <h1 class="wa-task-title">{html.escape(task.title)}</h1>
         </header>
         <section class="wa-brief">
-          <div class="wa-brief-label">Your brief</div>
+          <div class="wa-brief-label">{html.escape(brief_label)}</div>
           <div class="wa-brief-text">{html.escape(task.request)}</div>
         </section>
         """
@@ -473,10 +478,11 @@ def render_task_body(
             "from Recent work."
         )
         _render_supporting_details(task)
+        _render_version_history(task, service)
         return
 
     if task.status == "completed":
-        _render_completed_task(task)
+        _render_completed_task(task, service)
     elif task.status == "interrupted":
         st.warning(task.status_message)
         if task.can_resume and st.button(
@@ -491,6 +497,7 @@ def render_task_body(
             else:
                 st.rerun()
         _render_supporting_details(task)
+        _render_version_history(task, service)
     elif task.status == "escalated":
         st.warning(task.status_message)
         st.caption(
@@ -503,12 +510,42 @@ def render_task_body(
             icon=":material/replay:",
             key=f"retry-task-{task.id}",
         ):
-            _submit_brief(service, task.request)
+            _retry_task(service, task)
         _render_supporting_details(task)
+        _render_version_history(task, service)
     else:
         st.error(task.status_message)
-        st.caption("Start a new task to try again.")
+        if st.button(
+            "Try again",
+            type="primary",
+            icon=":material/replay:",
+            key=f"retry-task-{task.id}",
+        ):
+            _retry_task(service, task)
         _render_supporting_details(task)
+        _render_version_history(task, service)
+
+
+def _retry_task(service: WriterAgentService, task: TaskView) -> None:
+    submission_state_key = f"retry-submission-{task.id}"
+    submission_key = st.session_state.get(submission_state_key) or str(uuid4())
+    st.session_state[submission_state_key] = submission_key
+    try:
+        retry = service.retry_task(
+            task.id,
+            idempotency_key=submission_key,
+        )
+    except ValueError as exc:
+        st.error(str(exc))
+        return
+    except Exception:
+        st.error("Writer Agent could not retry this task. Try again.")
+        return
+
+    st.session_state[submission_state_key] = str(uuid4())
+    st.session_state.active_task_id = retry.id
+    st.query_params["task"] = retry.id
+    st.rerun()
 
 
 def render_progress(task: TaskView) -> None:
@@ -532,7 +569,10 @@ def render_progress(task: TaskView) -> None:
     )
 
 
-def _render_completed_task(task: TaskView) -> None:
+def _render_completed_task(
+    task: TaskView,
+    service: WriterAgentService,
+) -> None:
     if not task.final_answer:
         st.error("The workflow completed without a document.")
         return
@@ -554,6 +594,82 @@ def _render_completed_task(task: TaskView) -> None:
         )
 
     _render_supporting_details(task)
+    _render_version_history(task, service)
+    _render_follow_up(task, service)
+
+
+def _render_version_history(
+    task: TaskView,
+    service: WriterAgentService,
+) -> None:
+    """Render selectable immutable runs from the current conversation."""
+    try:
+        versions = service.list_task_versions(task.id)
+    except Exception:
+        return
+    if len(versions) <= 1:
+        return
+
+    with st.expander(f"Version history · {len(versions)} versions"):
+        for version in reversed(versions):
+            label = f"Version {version.turn_number}: {version.request}"
+            if len(label) > 96:
+                label = label[:95].rstrip() + "…"
+            if st.button(
+                label,
+                key=f"version-{version.id}",
+                disabled=version.id == task.id,
+                use_container_width=True,
+            ):
+                st.session_state.active_task_id = version.id
+                st.query_params["task"] = version.id
+                st.rerun()
+
+
+def _render_follow_up(
+    task: TaskView,
+    service: WriterAgentService,
+) -> None:
+    """Accept one revision instruction for the latest completed version."""
+    try:
+        versions = service.list_task_versions(task.id)
+    except Exception:
+        versions = []
+    is_latest = not versions or versions[-1].id == task.id
+    if not is_latest:
+        st.caption(
+            "Open the latest version to continue this conversation."
+        )
+        return
+
+    follow_up = st.chat_input(
+        "How should I revise or extend this?",
+        key=f"follow-up-{task.conversation_id}",
+        max_chars=8_000,
+    )
+    if not follow_up:
+        return
+
+    submission_state_key = f"follow-up-submission-{task.id}"
+    submission_key = st.session_state.get(submission_state_key) or str(uuid4())
+    st.session_state[submission_state_key] = submission_key
+    try:
+        next_task = service.create_follow_up(
+            task.id,
+            follow_up,
+            idempotency_key=submission_key,
+        )
+    except ValueError as exc:
+        st.error(str(exc))
+        return
+    except Exception:
+        st.error("Writer Agent could not start this revision. Try again.")
+        return
+
+    st.session_state[submission_state_key] = str(uuid4())
+    st.session_state.active_task_id = next_task.id
+    st.query_params["task"] = next_task.id
+    st.rerun()
 
 
 def render_copy_button(content: str) -> None:

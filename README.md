@@ -15,6 +15,8 @@ The project currently includes:
 - dark-only Streamlit product interface
 - rerun-safe background task execution
 - durable recent-task history and checkpoint resume
+- multi-turn conversations with immutable answer versions
+- supervisor-selected specialist reuse for efficient revisions
 
 ## Requirements
 
@@ -77,10 +79,18 @@ The app:
 - records meaningful plans, searches, specialist outputs, reviews, retries,
   and replans without exposing hidden reasoning or operational internals
 - supports Markdown download and clipboard copy
+- accepts follow-up instructions on completed documents
+- preserves every completed version within one visible conversation
+- reuses passed research or analysis when the supervisor determines it remains
+  valid, while rerunning affected specialists for changed or current information
+- records the latest checkpointed state of each run as
+  `tests/runs/<thread-id>.json`
 
 The UI uses the local Compose database URL by default. Set `DATABASE_URL` to
 override it. `WRITER_AGENT_USER_ID` is optional and defaults to `local-user`.
 `GROQ_MODEL` is optional and defaults to `openai/gpt-oss-120b`.
+Set `WRITER_AGENT_RUN_DIR` to store thread-named JSON run records somewhere
+other than `tests/runs`.
 
 ## Python API
 
@@ -115,6 +125,12 @@ Streamlit
 Streamlit stores only the selected task ID in session state. The task index is
 the UI source of truth, so reruns render persisted state instead of restarting
 the workflow. Each agent run owns its own Postgres checkpoint connection.
+
+Each visible conversation contains one or more immutable runs. A follow-up
+creates a new checkpoint thread linked to its parent run. The supervisor plans
+the revision from the previous effective request, reviewed answer, and passed
+specialist artifacts; only artifacts explicitly selected for reuse are copied
+into the new run.
 
 ## Test
 

@@ -10,8 +10,9 @@ from uuid import uuid4
 
 from writer_agent.persistence import PersistentWriterAgent
 from writer_agent.provider_errors import RetryableProviderError
+from writer_agent.run_records import record_run
 from writer_agent.task_store import PostgresTaskStore
-from writer_agent.ui_models import TaskSummary, TaskView
+from writer_agent.ui_models import TaskSummary, TaskVersionSummary, TaskView
 
 DEFAULT_USER_ID = "local-user"
 MAX_REQUEST_LENGTH = 8_000
@@ -70,12 +71,18 @@ class TaskRunner:
         task = self._store.get(task_id)
         try:
             with PersistentWriterAgent(self._database_url) as runtime:
-                callback = lambda state: self._store.update_from_state(
-                    task_id, state
-                )
+                def callback(state):
+                    self._store.update_from_state(task_id, state)
+                    try:
+                        record_run(task.thread_id, state)
+                    except (OSError, TypeError, ValueError):
+                        pass
+
                 metadata = {
                     "request_source": "streamlit",
                     "application_task_id": task_id,
+                    "conversation_id": task.conversation_id,
+                    "turn_number": task.turn_number,
                 }
                 if resume:
                     runtime.resume_stream(
@@ -84,12 +91,40 @@ class TaskRunner:
                         metadata=metadata,
                     )
                 else:
+                    initial_state = {
+                        "user_id": task.user_id,
+                        "user_request": task.request,
+                        "conversation_id": task.conversation_id,
+                        "turn_number": task.turn_number,
+                        "planning_mode": "initial",
+                    }
+                    revision_base = self._find_revision_base(task)
+                    if revision_base is not None:
+                        parent_snapshot = runtime.get_state(
+                            revision_base.thread_id
+                        )
+                        parent_state = dict(parent_snapshot.values)
+                        initial_state.update(
+                            {
+                                "planning_mode": "revision",
+                                "previous_effective_request": (
+                                    parent_state.get("effective_request")
+                                    or revision_base.request
+                                ),
+                                "previous_final_answer": (
+                                    revision_base.final_answer or ""
+                                ),
+                                "previous_subtasks": list(
+                                    parent_state.get("subtasks", [])
+                                ),
+                                "previous_subtask_results": dict(
+                                    parent_state.get("subtask_results", {})
+                                ),
+                            }
+                        )
                     runtime.start_stream(
                         task.thread_id,
-                        {
-                            "user_id": task.user_id,
-                            "user_request": task.request,
-                        },
+                        initial_state,
                         on_state=callback,
                         metadata=metadata,
                     )
@@ -102,9 +137,15 @@ class TaskRunner:
             )
             try:
                 with PersistentWriterAgent(self._database_url) as runtime:
-                    has_checkpoint = bool(
+                    checkpoint_state = dict(
                         runtime.get_state(task.thread_id).values
                     )
+                    has_checkpoint = bool(checkpoint_state)
+                    if has_checkpoint:
+                        try:
+                            record_run(task.thread_id, checkpoint_state)
+                        except (OSError, TypeError, ValueError):
+                            pass
             except Exception:
                 has_checkpoint = False
             if has_checkpoint:
@@ -123,6 +164,20 @@ class TaskRunner:
                     task_id,
                     internal_error=error_text,
                 )
+
+    def _find_revision_base(self, task: TaskView) -> TaskView | None:
+        """Find the nearest successful answer behind a conversation turn."""
+        parent_task_id = task.parent_task_id
+        visited: set[str] = set()
+        while parent_task_id is not None:
+            if parent_task_id in visited:
+                raise RuntimeError("Conversation history contains a cycle.")
+            visited.add(parent_task_id)
+            parent = self._store.get(parent_task_id, user_id=task.user_id)
+            if parent.status == "completed" and parent.final_answer is not None:
+                return parent
+            parent_task_id = parent.parent_task_id
+        return None
 
 
 class WriterAgentService:
@@ -180,17 +235,67 @@ class WriterAgentService:
             self._runner.submit(task.id)
         return task
 
+    def create_follow_up(
+        self,
+        task_id: str,
+        request: str,
+        *,
+        idempotency_key: str | None = None,
+    ) -> TaskView:
+        """Append and asynchronously execute a revision turn."""
+        normalized = " ".join(request.split())
+        if len(normalized) < 3:
+            raise ValueError(
+                "Describe the change you want in at least 3 characters."
+            )
+        if len(request) > MAX_REQUEST_LENGTH:
+            raise ValueError(
+                f"Follow-ups are limited to {MAX_REQUEST_LENGTH:,} characters."
+            )
+        task, created = self._store.create_follow_up(
+            parent_task_id=task_id,
+            user_id=self.user_id,
+            request=request.strip(),
+            idempotency_key=idempotency_key or str(uuid4()),
+        )
+        if created or (
+            task.status == "queued" and not self._runner.is_active(task.id)
+        ):
+            self._runner.submit(task.id)
+        return task
+
     def get_task(self, task_id: str) -> TaskView:
         return self._store.get(task_id, user_id=self.user_id)
 
     def list_recent_tasks(self, *, limit: int = 20) -> list[TaskSummary]:
         return self._store.list_recent(self.user_id, limit=limit)
 
+    def list_task_versions(self, task_id: str) -> list[TaskVersionSummary]:
+        return self._store.list_versions(task_id, user_id=self.user_id)
+
     def resume_task(self, task_id: str) -> TaskView:
         task = self.get_task(task_id)
         if task.status != "interrupted" or not task.can_resume:
             raise ValueError("This task is not waiting to be resumed.")
         self._runner.submit(task.id, resume=True)
+        return task
+
+    def retry_task(
+        self,
+        task_id: str,
+        *,
+        idempotency_key: str | None = None,
+    ) -> TaskView:
+        """Create and run a fresh version of a failed conversation turn."""
+        task, created = self._store.create_retry(
+            task_id=task_id,
+            user_id=self.user_id,
+            idempotency_key=idempotency_key or str(uuid4()),
+        )
+        if created or (
+            task.status == "queued" and not self._runner.is_active(task.id)
+        ):
+            self._runner.submit(task.id)
         return task
 
     def close(self) -> None:

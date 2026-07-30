@@ -4,6 +4,15 @@ import operator
 from typing import Annotated, Any, Literal, TypeAlias, TypedDict
 
 AgentType: TypeAlias = Literal["research", "data", "writing"]
+PlanningMode: TypeAlias = Literal["initial", "revision"]
+RevisionIntent: TypeAlias = Literal[
+    "edit",
+    "extend",
+    "verify",
+    "reanalyze",
+    "replace",
+    "question",
+]
 SubtaskStatus: TypeAlias = Literal[
     "pending",
     "running",
@@ -101,9 +110,21 @@ def merge_workflow_events(
 class SupervisorState(TypedDict, total=False):
     task_id: str
     thread_id: str
+    conversation_id: str
+    turn_number: int
     user_id: str
     user_request: str
+    effective_request: str
     run_metadata: dict[str, Any]
+    planning_mode: PlanningMode
+
+    previous_effective_request: str
+    previous_final_answer: str
+    previous_subtasks: list[Subtask]
+    previous_subtask_results: dict[str, SubtaskResult]
+    revision_intent: RevisionIntent
+    reuse_previous_answer: bool
+    reused_agent_types: list[AgentType]
 
     status: WorkflowStatus
     error: str | None

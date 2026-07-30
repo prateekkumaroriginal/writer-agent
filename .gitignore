@@ -22,7 +22,7 @@ htmlcov/
 tests/runs/
 
 # Local artifacts
-.plans/
+.html/
 
 # OS and editor files
 .DS_Store

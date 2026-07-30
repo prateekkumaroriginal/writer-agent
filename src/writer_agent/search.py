@@ -15,7 +15,7 @@ def search_web(query: str) -> list[dict[str, str]]:
     response = client.search(
         query=query,
         search_depth="basic",
-        max_results=5,
+        max_results=8,
         include_answer=False,
         include_raw_content=False,
     )

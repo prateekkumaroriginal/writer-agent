@@ -3,7 +3,7 @@
 from typing import Any
 
 from writer_agent.schemas import PlannedSubtaskSchema
-from writer_agent.state import AgentType, Subtask, SupervisorState
+from writer_agent.state import AgentType, Subtask, SubtaskResult, SupervisorState
 
 TOOLS_BY_AGENT_TYPE: dict[AgentType, list[str]] = {
     "research": ["web_search"],
@@ -46,6 +46,8 @@ def all_subtasks_passed(state: SupervisorState) -> bool:
 
 def build_runtime_subtasks(
     planned_subtasks: list[PlannedSubtaskSchema],
+    *,
+    start_index: int = 1,
 ) -> list[Subtask]:
     """Convert planned subtasks into executable runtime subtasks."""
     return [
@@ -59,8 +61,88 @@ def build_runtime_subtasks(
             "status": "pending",
             "retry_count": 0,
         }
-        for index, planned in enumerate(planned_subtasks, start=1)
+        for index, planned in enumerate(planned_subtasks, start=start_index)
     ]
+
+
+def build_reused_artifacts(
+    state: SupervisorState,
+    *,
+    reuse_research: bool,
+    reuse_data: bool,
+) -> tuple[list[Subtask], dict[str, SubtaskResult], list[AgentType]]:
+    """Copy selected passed parent artifacts into a revision run."""
+    allowed: set[AgentType] = set()
+    if reuse_research:
+        allowed.add("research")
+    if reuse_data:
+        allowed.add("data")
+
+    previous_results = state.get("previous_subtask_results", {})
+    subtasks: list[Subtask] = []
+    results: dict[str, SubtaskResult] = {}
+    reused_types: list[AgentType] = []
+    for index, previous in enumerate(state.get("previous_subtasks", []), start=1):
+        agent_type = previous.get("agent_type")
+        if previous.get("status") != "passed" or agent_type not in allowed:
+            continue
+        result = previous_results.get(previous["id"])
+        if result is None or result.get("errors"):
+            continue
+        artifact_id = f"reused-{index}"
+        subtasks.append(
+            {
+                **previous,
+                "id": artifact_id,
+                "status": "passed",
+                "retry_count": 0,
+            }
+        )
+        results[artifact_id] = {**result, "subtask_id": artifact_id}
+        if agent_type not in reused_types:
+            reused_types.append(agent_type)
+    return subtasks, results, reused_types
+
+
+def effective_request(state: SupervisorState) -> str:
+    """Return the standalone request specialists should execute."""
+    return state.get("effective_request") or state.get("user_request", "")
+
+
+def previous_answer_context(state: SupervisorState) -> str:
+    """Return the prior reviewed answer only when the supervisor approved reuse."""
+    if not state.get("reuse_previous_answer"):
+        return "No previous answer was selected for reuse."
+    return (
+        state.get("previous_final_answer")
+        or "No previous answer was available."
+    )
+
+
+def format_previous_artifacts_for_supervisor(state: SupervisorState) -> str:
+    """Summarize reusable parent artifacts without exposing graph internals."""
+    results = state.get("previous_subtask_results", {})
+    sections: list[str] = []
+    for subtask in state.get("previous_subtasks", []):
+        if (
+            subtask.get("status") != "passed"
+            or subtask.get("agent_type") == "writing"
+        ):
+            continue
+        result = results.get(subtask["id"])
+        if result is None or result.get("errors"):
+            continue
+        output = format_specialist_output(result.get("output", {}))
+        if not output:
+            continue
+        sections.append(
+            f"{subtask['agent_type'].title()} artifact:\n{output[:4000]}"
+        )
+    return (
+        "\n\n".join(sections)
+        if sections
+        else "No passed specialist artifacts are available."
+    )
 
 
 def format_search_results_for_research(

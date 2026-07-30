@@ -1,14 +1,29 @@
 """Nodes and routers owned by the parent supervisor graph."""
 
+import re
 from uuid import uuid4
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from writer_agent.helpers import all_subtasks_passed, build_runtime_subtasks
+from writer_agent.helpers import (
+    all_subtasks_passed,
+    build_reused_artifacts,
+    build_runtime_subtasks,
+    format_previous_artifacts_for_supervisor,
+)
 from writer_agent.model import llm
-from writer_agent.prompts import FINAL_REVIEW_SYSTEM_PROMPT, SUPERVISOR_SYSTEM_PROMPT
+from writer_agent.prompts import (
+    FINAL_REVIEW_SYSTEM_PROMPT,
+    SUPERVISOR_REVISION_SYSTEM_PROMPT,
+    SUPERVISOR_SYSTEM_PROMPT,
+)
 from writer_agent.provider_errors import raise_if_retryable_provider_error
-from writer_agent.schemas import FinalReviewSchema, SupervisorPlanSchema
+from writer_agent.schemas import (
+    FinalReviewSchema,
+    PlannedSubtaskSchema,
+    SupervisorPlanSchema,
+    SupervisorRevisionPlanSchema,
+)
 from writer_agent.state import FinalReview, SupervisorState
 from writer_agent.workflow_events import workflow_event
 
@@ -22,9 +37,23 @@ def initialise_task(state: SupervisorState) -> SupervisorState:
     return {
         "task_id": str(uuid4()),
         "thread_id": state.get("thread_id", ""),
+        "conversation_id": state.get("conversation_id", ""),
+        "turn_number": state.get("turn_number", 1),
         "user_id": state.get("user_id"),
         "user_request": state.get("user_request", ""),
+        "effective_request": state.get("user_request", ""),
         "run_metadata": dict(state.get("run_metadata", {})),
+        "planning_mode": state.get("planning_mode", "initial"),
+        "previous_effective_request": state.get(
+            "previous_effective_request", ""
+        ),
+        "previous_final_answer": state.get("previous_final_answer", ""),
+        "previous_subtasks": list(state.get("previous_subtasks", [])),
+        "previous_subtask_results": dict(
+            state.get("previous_subtask_results", {})
+        ),
+        "reuse_previous_answer": False,
+        "reused_agent_types": [],
         "status": "initialised",
         "error": None,
         "plan": "",
@@ -48,9 +77,129 @@ def initialise_task(state: SupervisorState) -> SupervisorState:
     }
 
 
-def supervisor_plan(state: SupervisorState) -> SupervisorState:
-    """Generate an executable plan, incorporating replan feedback when present."""
+def _initial_planning_request(state: SupervisorState, request: str) -> str:
+    """Build the initial/replan request while preserving existing behavior."""
+    replan_feedback = state.get("replan_feedback", [])
+    if not replan_feedback:
+        return request
+    feedback_text = "\n".join(f"- {issue}" for issue in replan_feedback)
+    return f"""
+User request:
+{request}
+
+Replanning feedback from the reviewer:
+{feedback_text}
+
+Create a corrected plan that addresses this feedback.
+""".strip()
+
+
+def _run_initial_plan(state: SupervisorState, request: str):
     supervisor_llm = llm.with_structured_output(SupervisorPlanSchema)
+    return supervisor_llm.invoke(
+        [
+            SystemMessage(SUPERVISOR_SYSTEM_PROMPT),
+            HumanMessage(_initial_planning_request(state, request)),
+        ]
+    )
+
+
+def _forced_revision_subtasks(
+    user_message: str,
+    planned: list[PlannedSubtaskSchema],
+) -> list[PlannedSubtaskSchema]:
+    """Conservatively add specialist work required by explicit trigger words."""
+    normalized = " ".join(user_message.casefold().split())
+    agent_types = [subtask.agent_type for subtask in planned]
+    research_required = bool(
+        re.search(
+            (
+                r"\b(latest|today|up-to-date|verify|fact-check)\b"
+                r"|\bcurrent(?:\s+\w+){0,3}\s+(information|data|version|"
+                r"news|pricing|status|facts?)\b"
+            ),
+            normalized,
+        )
+        or any(
+            phrase in normalized
+            for phrase in ("add sources", "cite sources", "source this")
+        )
+    )
+    data_required = bool(
+        re.search(r"\b(recalculate|calculate|compute)\b", normalized)
+        or "new dataset" in normalized
+    )
+
+    result = list(planned)
+    writing_index = len(result) - 1
+    if research_required and "research" not in agent_types:
+        result.insert(
+            0,
+            PlannedSubtaskSchema(
+                agent_type="research",
+                objective=(
+                    "Gather or verify the current source-grounded information "
+                    "required by the follow-up."
+                ),
+                expected_output="Relevant research notes with sources.",
+                review_criteria=[
+                    "Uses current relevant sources",
+                    "Addresses the follow-up directly",
+                ],
+            ),
+        )
+        writing_index += 1
+    if data_required and "data" not in agent_types:
+        result.insert(
+            writing_index,
+            PlannedSubtaskSchema(
+                agent_type="data",
+                objective=(
+                    "Perform the calculation or updated analysis requested in "
+                    "the follow-up."
+                ),
+                expected_output="A checked analysis suitable for the writer.",
+                review_criteria=[
+                    "Uses the stated inputs",
+                    "Calculations are internally consistent",
+                ],
+            ),
+        )
+    return result
+
+
+def _revision_planning_request(state: SupervisorState) -> str:
+    feedback = state.get("replan_feedback", [])
+    return f"""
+Previous effective request:
+{state.get("previous_effective_request") or "Not available"}
+
+Previous reviewed answer:
+{state.get("previous_final_answer") or "Not available"}
+
+Available passed artifacts:
+{format_previous_artifacts_for_supervisor(state)}
+
+New user message:
+{state.get("user_request")}
+
+Reviewer feedback for replanning:
+{chr(10).join(f"- {item}" for item in feedback) if feedback else "None"}
+""".strip()
+
+
+def _run_revision_plan(state: SupervisorState):
+    supervisor_llm = llm.with_structured_output(SupervisorRevisionPlanSchema)
+    return supervisor_llm.invoke(
+        [
+            SystemMessage(SUPERVISOR_REVISION_SYSTEM_PROMPT),
+            HumanMessage(_revision_planning_request(state)),
+        ]
+    )
+
+
+def supervisor_plan(state: SupervisorState) -> SupervisorState:
+    """Generate an initial or artifact-aware revision execution plan."""
     user_request = state.get("user_request")
     if not user_request:
         return {
@@ -63,27 +212,66 @@ def supervisor_plan(state: SupervisorState) -> SupervisorState:
         }
 
     replan_feedback = state.get("replan_feedback", [])
-    planning_request = user_request
-    if replan_feedback:
-        feedback_text = "\n".join(f"- {issue}" for issue in replan_feedback)
-        planning_request = f"""
-User request:
-{user_request}
-
-Replanning feedback from the reviewer:
-{feedback_text}
-
-Create a corrected plan that addresses this feedback.
-""".strip()
-
+    is_revision = state.get("planning_mode") == "revision"
     try:
-        plan = supervisor_llm.invoke(
-            [
-                SystemMessage(SUPERVISOR_SYSTEM_PROMPT),
-                HumanMessage(planning_request),
-            ]
-        )
-        runtime_subtasks = build_runtime_subtasks(plan.subtasks)
+        if is_revision:
+            revision_plan = _run_revision_plan(state)
+            if revision_plan.plan_confidence <= 0.5:
+                plan = _run_initial_plan(state, revision_plan.effective_request)
+                effective_request = revision_plan.effective_request
+                runtime_subtasks = build_runtime_subtasks(plan.subtasks)
+                reused_results = {}
+                reused_types = []
+                reuse_previous_answer = False
+                revision_intent = "replace"
+            else:
+                planned_subtasks = _forced_revision_subtasks(
+                    user_request,
+                    revision_plan.subtasks,
+                )
+                planned_types = {
+                    subtask.agent_type for subtask in planned_subtasks
+                }
+                replacing = revision_plan.intent == "replace"
+                reuse_research = (
+                    revision_plan.reuse_research
+                    and "research" not in planned_types
+                    and not replacing
+                )
+                reuse_data = (
+                    revision_plan.reuse_data
+                    and "data" not in planned_types
+                    and "research" not in planned_types
+                    and not replacing
+                )
+                reused_subtasks, reused_results, reused_types = (
+                    build_reused_artifacts(
+                        state,
+                        reuse_research=reuse_research,
+                        reuse_data=reuse_data,
+                    )
+                )
+                new_subtasks = build_runtime_subtasks(
+                    planned_subtasks,
+                    start_index=len(reused_subtasks) + 1,
+                )
+                runtime_subtasks = [*reused_subtasks, *new_subtasks]
+                effective_request = revision_plan.effective_request
+                plan = revision_plan
+                reuse_previous_answer = (
+                    revision_plan.reuse_previous_answer
+                    and bool(state.get("previous_final_answer"))
+                    and not replacing
+                )
+                revision_intent = revision_plan.intent
+        else:
+            plan = _run_initial_plan(state, user_request)
+            effective_request = user_request
+            runtime_subtasks = build_runtime_subtasks(plan.subtasks)
+            reused_results = {}
+            reused_types = []
+            reuse_previous_answer = False
+            revision_intent = None
     except Exception as exc:
         raise_if_retryable_provider_error(exc)
         return {
@@ -103,9 +291,12 @@ Create a corrected plan that addresses this feedback.
         "error": None,
         "plan": plan.plan,
         "plan_confidence": plan.plan_confidence,
+        "effective_request": effective_request,
         "subtasks": runtime_subtasks,
         "current_subtask_id": None,
-        "subtask_results": {},
+        "subtask_results": reused_results,
+        "reuse_previous_answer": reuse_previous_answer,
+        "reused_agent_types": reused_types,
         "final_review": None,
         "final_retry_count": 0,
         "revision_feedback": [],
@@ -113,17 +304,26 @@ Create a corrected plan that addresses this feedback.
         "replan_feedback": [],
         "escalation_reason": None,
         "final_answer": None,
+        **(
+            {"revision_intent": revision_intent}
+            if revision_intent is not None
+            else {}
+        ),
         "workflow_events": [
             workflow_event(
                 "replan" if state.get("replan_count", 0) else "plan",
                 "Revised plan"
                 if state.get("replan_count", 0)
-                else "Initial plan",
+                else ("Revision plan" if is_revision else "Initial plan"),
                 content=plan.plan,
                 details=[
                     *[
                         f"Reviewer feedback: {issue}"
                         for issue in replan_feedback
+                    ],
+                    *[
+                        f"Reused {agent_type} artifact"
+                        for agent_type in reused_types
                     ],
                     *[
                         (
@@ -134,7 +334,11 @@ Create a corrected plan that addresses this feedback.
                             + "; ".join(subtask["review_criteria"])
                         )
                         for index, subtask in enumerate(
-                            runtime_subtasks,
+                            [
+                                subtask
+                                for subtask in runtime_subtasks
+                                if not subtask["id"].startswith("reused-")
+                            ],
                             start=1,
                         )
                     ],

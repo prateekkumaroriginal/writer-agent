@@ -3,11 +3,13 @@
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from writer_agent.helpers import (
+    effective_request,
     format_research_context_for_data,
     format_search_results_for_research,
     format_subtask_brief,
     format_upstream_specialist_brief,
     get_current_subtask,
+    previous_answer_context,
     update_subtask,
 )
 from writer_agent.model import llm
@@ -84,13 +86,14 @@ def route_after_pick_next_subtask(state: SupervisorState) -> str:
 def build_search_query(state: SupervisorState, subtask: Subtask) -> str:
     """Generate and normalize a provider-safe research query."""
     search_query_llm = llm.with_structured_output(SearchQuerySchema)
+    retry_feedback = _retry_feedback_for_subtask(state, subtask)
     response = search_query_llm.invoke(
         [
             SystemMessage(content=SEARCH_QUERY_SYSTEM_PROMPT),
             HumanMessage(
                 content=f"""
 User request:
-{state.get("user_request")}
+{effective_request(state)}
 
 Research objective:
 {subtask["objective"]}
@@ -100,6 +103,9 @@ Expected output:
 
 Review criteria:
 {chr(10).join(f"- {criterion}" for criterion in subtask.get("review_criteria", []))}
+
+Reviewer feedback from previous attempts:
+{chr(10).join(f"- {issue}" for issue in retry_feedback) if retry_feedback else "None"}
 """.strip()
             ),
         ]
@@ -110,6 +116,17 @@ Review criteria:
             f"Generated search query is too long: {len(query)} characters."
         )
     return query
+
+
+def _retry_feedback_for_subtask(
+    state: SupervisorState,
+    subtask: Subtask,
+) -> list[str]:
+    """Return the latest reviewer issues for this retried subtask."""
+    for report in reversed(state.get("review_reports", [])):
+        if report.get("subtask_id") == subtask["id"]:
+            return list(report.get("issues", []))
+    return []
 
 
 def _review_workflow_event(
@@ -169,6 +186,7 @@ def research_agent(state: SupervisorState) -> SupervisorState:
             content=query,
         )
     ]
+    retry_feedback = _retry_feedback_for_subtask(state, subtask)
 
     try:
         search_results = search_web(query)
@@ -179,7 +197,7 @@ def research_agent(state: SupervisorState) -> SupervisorState:
                 HumanMessage(
                     content=f"""
 User request:
-{state.get("user_request")}
+{effective_request(state)}
 
 Research task:
 Objective:
@@ -193,6 +211,9 @@ Review criteria:
 
 Search results:
 {search_context}
+
+Reviewer feedback from previous attempts:
+{chr(10).join(f"- {issue}" for issue in retry_feedback) if retry_feedback else "None"}
 """.strip()
                 ),
             ]
@@ -268,7 +289,7 @@ def data_agent(state: SupervisorState) -> SupervisorState:
                 HumanMessage(
                     content=f"""
 User request:
-{state.get("user_request")}
+{effective_request(state)}
 
 Data task:
 {format_subtask_brief(subtask)}
@@ -339,13 +360,16 @@ def writing_agent(state: SupervisorState) -> SupervisorState:
                 HumanMessage(
                     content=f"""
 User request:
-{state.get("user_request")}
+{effective_request(state)}
 
 Writing task:
 {format_subtask_brief(subtask)}
 
 Upstream specialist context:
 {format_upstream_specialist_brief(state)}
+
+Previous reviewed answer:
+{previous_answer_context(state)}
 
 Final-review revision feedback:
 {feedback_text}
@@ -485,6 +509,8 @@ def route_after_subtask_review(state: SupervisorState) -> str:
             return "escalate"
         if subtask.get("retry_count", 0) < state.get("max_retries", 0):
             return "retry"
+        if state.get("replan_count", 0) < state.get("max_replans", 0):
+            return "replan"
         return "fail"
     return "escalate"
 
@@ -567,6 +593,7 @@ def mark_subtask_failed(state: SupervisorState) -> SupervisorState:
             "current_subtask_id": None,
         }
     return {
+        "status": "escalated",
         "subtasks": update_subtask(state, subtask["id"], status="failed"),
         "current_subtask_id": None,
         "escalation_reason": f"Subtask {subtask['id']} failed after retries.",
