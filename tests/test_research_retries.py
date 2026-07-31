@@ -8,11 +8,16 @@ from langchain_core.messages import HumanMessage
 
 from writer_agent.parent_nodes import route_after_specialists
 from writer_agent.prompts import REVIEWER_SYSTEM_PROMPT
-from writer_agent.schemas import ReviewDecisionSchema, SearchQuerySchema
+from writer_agent.schemas import (
+    ResearchResponseSchema,
+    ReviewDecisionSchema,
+    SearchQuerySchema,
+)
 from writer_agent.search import search_web
 from writer_agent.specialist_nodes import (
     build_search_query,
     mark_subtask_failed,
+    research_agent,
     review_agent,
     route_after_subtask_review,
 )
@@ -77,6 +82,63 @@ class ResearchRetryTests(unittest.TestCase):
         self.assertEqual(report["score"], 0.60)
         self.assertEqual(report["action"], "pass")
         self.assertEqual(report["issues"], [])
+        event = result["workflow_events"][0]
+        self.assertEqual(event["subtask_name"], "Research task")
+        self.assertEqual(event["agent"], "Research agent")
+        self.assertEqual(
+            event["review_criteria"],
+            ["Include official and protester viewpoints."],
+        )
+        self.assertEqual(event["attempt"], 1)
+        self.assertEqual(event["retry_count"], 0)
+
+    def test_research_event_attaches_its_sources_and_attempt(self):
+        subtask = research_subtask(retry_count=1)
+        state = {
+            "user_request": "Create a balanced report.",
+            "current_subtask_id": "s1",
+            "subtasks": [subtask],
+            "review_reports": [],
+        }
+        query_runner = Mock()
+        query_runner.invoke.return_value = SearchQuerySchema(
+            query="balanced report official sources"
+        )
+        research_runner = Mock()
+        research_runner.invoke.return_value = ResearchResponseSchema(
+            summary="A grounded summary.",
+            findings=["A supported finding."],
+            uncertainties=[],
+            confidence=0.8,
+        )
+        fake_llm = Mock()
+        fake_llm.with_structured_output.side_effect = lambda schema: {
+            SearchQuerySchema: query_runner,
+            ResearchResponseSchema: research_runner,
+        }[schema]
+        source = {
+            "title": "Official evidence",
+            "url": "https://example.com/evidence",
+            "snippet": "Supporting context.",
+        }
+
+        with (
+            patch("writer_agent.specialist_nodes.llm", fake_llm),
+            patch(
+                "writer_agent.specialist_nodes.search_web",
+                return_value=[source],
+            ),
+        ):
+            result = research_agent(state)
+
+        event = next(
+            item
+            for item in result["workflow_events"]
+            if item["kind"] == "research"
+        )
+        self.assertEqual(event["sources"], [source])
+        self.assertEqual(event["attempt"], 2)
+        self.assertEqual(event["retry_count"], 1)
 
     def test_reviewer_prompt_documents_research_threshold(self):
         self.assertIn("greater", REVIEWER_SYSTEM_PROMPT)

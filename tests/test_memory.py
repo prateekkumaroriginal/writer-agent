@@ -292,6 +292,7 @@ class MemoryContextTests(unittest.TestCase):
             "id": "memory-event-1",
             "kind": "memory",
             "title": "Memory deleted",
+            "created_at": datetime.now(UTC).isoformat(),
             "content": "Use British English.",
         }
 

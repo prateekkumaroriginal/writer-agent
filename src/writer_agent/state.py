@@ -87,9 +87,17 @@ class WorkflowEvent(TypedDict, total=False):
     id: str
     kind: WorkflowEventKind
     title: str
+    created_at: str
     content: str
     details: list[str]
     decision: str
+    subtask_name: str
+    objective: str
+    agent: str
+    review_criteria: list[str]
+    attempt: int
+    retry_count: int
+    sources: list[dict[str, str]]
 
 
 def merge_workflow_events(

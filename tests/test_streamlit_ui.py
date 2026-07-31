@@ -2,18 +2,24 @@
 
 import unittest
 from datetime import UTC, datetime
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 from writer_agent.streamlit_ui import (
     APP_CSS,
     NEW_TASK_LABEL,
     _render_memory_list,
+    _render_workflow_event,
     _render_task_navigation,
     _render_supporting_details,
     render_sidebar,
     render_task_body,
 )
-from writer_agent.ui_models import TaskSummary, TaskView, steps_for_stage
+from writer_agent.ui_models import (
+    TaskSummary,
+    TaskView,
+    WorkflowEventView,
+    steps_for_stage,
+)
 
 
 class SidebarNavigationTests(unittest.TestCase):
@@ -49,6 +55,10 @@ class SidebarNavigationTests(unittest.TestCase):
         self.assertIn("text-align: left;", APP_CSS)
         self.assertIn(
             '.stButton > [data-testid="stBaseButton-primary"]',
+            APP_CSS,
+        )
+        self.assertIn(
+            '[class*="st-key-workflow-event-"] details summary',
             APP_CSS,
         )
 
@@ -96,6 +106,7 @@ class SidebarNavigationTests(unittest.TestCase):
                     "id": "event-1",
                     "kind": "plan",
                     "title": "Initial plan",
+                    "created_at": now,
                     "content": "Research and write.",
                 }
             ],
@@ -114,6 +125,85 @@ class SidebarNavigationTests(unittest.TestCase):
             render_task_body(task, service=object())
 
         render_details.assert_called_once_with(task)
+
+    def test_workflow_event_renders_requested_details(self):
+        event = WorkflowEventView(
+            id="event-1",
+            kind="research",
+            title="Research response",
+            created_at=datetime(2026, 7, 31, 8, 30, tzinfo=UTC),
+            content="Research summary.",
+            decision="retry",
+            subtask_name="Research task",
+            objective="Find supporting evidence.",
+            agent="Research agent",
+            review_criteria=["Uses authoritative sources"],
+            attempt=2,
+            retry_count=1,
+            sources=[
+                {
+                    "title": "Evidence",
+                    "url": "https://example.com/evidence",
+                }
+            ],
+        )
+        expander = MagicMock()
+        metadata_container = MagicMock()
+
+        with (
+            patch(
+                "writer_agent.streamlit_ui.st.expander",
+                return_value=expander,
+            ) as render_expander,
+            patch(
+                "writer_agent.streamlit_ui.st.caption"
+            ) as render_caption,
+            patch(
+                "writer_agent.streamlit_ui.st.markdown"
+            ) as render_markdown,
+            patch("writer_agent.streamlit_ui.st.write"),
+            patch(
+                "writer_agent.streamlit_ui.st.container",
+                return_value=metadata_container,
+            ) as render_container,
+            patch(
+                "writer_agent.streamlit_ui.st.link_button"
+            ) as render_link,
+        ):
+            _render_workflow_event(event)
+
+        self.assertIn("31 Jul, 08:30 UTC", render_expander.call_args.args[0])
+        self.assertTrue(
+            render_expander.call_args.args[0].startswith(
+                "`Retry` Research response"
+            )
+        )
+        self.assertIn(
+            "workflow-event-decision-orange-event-1",
+            render_expander.call_args.kwargs["key"],
+        )
+        markdown_values = [
+            call.args[0] for call in render_markdown.call_args_list
+        ]
+        self.assertIn(
+            "**Research task · Research agent**",
+            markdown_values,
+        )
+        caption_values = [
+            call.args[0] for call in render_caption.call_args_list
+        ]
+        self.assertIn("Run details", caption_values)
+        self.assertIn("Attempt 2 · 1 retries", caption_values)
+        self.assertIn("Review criteria", caption_values)
+        self.assertIn("Research output", caption_values)
+        render_container.assert_called_once_with(
+            key="workflow-meta-event-1"
+        )
+        render_link.assert_called_once()
+        self.assertEqual(
+            render_link.call_args.args[:2],
+            ("Evidence", "https://example.com/evidence"),
+        )
 
     def test_escalated_try_again_uses_conversation_retry(self):
         now = datetime.now(UTC)

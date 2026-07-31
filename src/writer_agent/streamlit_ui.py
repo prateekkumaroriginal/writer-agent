@@ -10,7 +10,7 @@ from uuid import uuid4
 import streamlit as st
 
 from writer_agent.service import WriterAgentService
-from writer_agent.ui_models import TaskSummary, TaskView
+from writer_agent.ui_models import TaskSummary, TaskView, WorkflowEventView
 
 STATUS_LABELS = {
     "queued": "Queued",
@@ -225,6 +225,66 @@ h1 { letter-spacing: -0.04em; }
   border-radius: 0.75rem;
   background: #1b1b2d;
   color: #ddddf2;
+}
+
+[class*="st-key-workflow-meta-"] {
+  margin-bottom: 1rem;
+  padding: 0.8rem 1rem 0.9rem;
+  border: 1px solid var(--wa-border);
+  border-radius: 0.65rem;
+  background: rgba(150, 151, 255, 0.055);
+}
+[class*="st-key-workflow-meta-"] [data-testid="stCaptionContainer"] {
+  color: #8f90a3;
+  font-size: 0.68rem;
+  font-weight: 760;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+[class*="st-key-workflow-event-decision-"] summary code {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.12rem 0.42rem;
+  border: 1px solid currentColor;
+  border-radius: 0.35rem;
+  font-family: inherit;
+  font-size: 0.74rem;
+  font-weight: 700;
+  line-height: 1.25;
+  vertical-align: middle;
+}
+[class*="st-key-workflow-event-"] details summary {
+  align-items: center;
+  min-height: 3.35rem;
+  padding-block: 0.7rem;
+  overflow: visible;
+}
+[class*="st-key-workflow-event-"] details summary p {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin: 0;
+  line-height: 1.35;
+}
+[class*="st-key-workflow-event-decision-green-"] summary code {
+  background: rgba(46, 160, 86, 0.14);
+  color: #52d681;
+}
+[class*="st-key-workflow-event-decision-orange-"] summary code {
+  background: rgba(224, 137, 44, 0.14);
+  color: #f1a654;
+}
+[class*="st-key-workflow-event-decision-yellow-"] summary code {
+  background: rgba(203, 170, 48, 0.14);
+  color: #e3c75d;
+}
+[class*="st-key-workflow-event-decision-red-"] summary code {
+  background: rgba(217, 72, 72, 0.14);
+  color: #ee7777;
+}
+[class*="st-key-workflow-event-decision-blue-"] summary code {
+  background: rgba(75, 129, 221, 0.14);
+  color: #78a7f5;
 }
 .wa-pulse {
   width: 0.62rem;
@@ -771,27 +831,17 @@ def render_copy_button(content: str) -> None:
 
 
 def _render_supporting_details(task: TaskView) -> None:
-    if not any(
-        (task.sources, task.plan, task.review, task.workflow_events)
-    ):
+    if not task.sources and not task.workflow_events:
         return
     st.write("")
     workflow_tab, sources_tab = st.tabs(["Workflow", "Sources"])
     with workflow_tab:
-        if task.workflow_events:
-            st.caption(
-                "Meaningful workflow outputs in the order they were produced. "
-                "Hidden reasoning, prompts, and operational errors are excluded."
-            )
-            for event in task.workflow_events:
-                with st.container(border=True):
-                    st.markdown(f"#### {event.title}")
-                    if event.content:
-                        st.markdown(event.content)
-                    for detail in event.details:
-                        st.markdown(f"- {detail}")
-        else:
-            _render_legacy_workflow(task)
+        st.caption(
+            "Meaningful workflow outputs in the order they were produced. "
+            "Hidden reasoning, prompts, and operational errors are excluded."
+        )
+        for event in task.workflow_events:
+            _render_workflow_event(event)
     with sources_tab:
         if not task.sources:
             st.caption("No research sources were recorded for this task.")
@@ -810,34 +860,101 @@ def _render_supporting_details(task: TaskView) -> None:
                     st.caption(source.snippet)
 
 
-def _render_legacy_workflow(task: TaskView) -> None:
-    """Keep pre-event tasks useful after the projection migration."""
-    st.caption(
-        "This task predates the detailed workflow feed. Available saved "
-        "details are shown below."
-    )
-    if task.plan:
-        st.markdown("#### Plan")
-        st.write(task.plan)
-    st.markdown("#### Stages")
-    for step in task.steps:
-        symbol = {
-            "done": "✓",
-            "current": "●",
-            "upcoming": "○",
-            "error": "!",
-        }[step.status]
-        st.write(f"{symbol} {step.label}")
-    if task.review is not None:
-        st.markdown("#### Final review")
-        st.write(
-            "Passed final review."
-            if task.review.passed
-            else "Did not pass final review."
+def _render_workflow_event(event: WorkflowEventView) -> None:
+    """Render one workflow artifact as a collapsible, scannable section."""
+    timestamp = event.created_at.astimezone(UTC)
+    label = f"{event.title} · {timestamp:%d %b, %H:%M UTC}"
+    key = f"workflow-event-{event.id}"
+    if event.decision:
+        badge_label, badge_color = _decision_badge(event.decision)
+        label = f"`{badge_label}` {label}"
+        key = f"workflow-event-decision-{badge_color}-{event.id}"
+
+    with st.expander(label, key=key):
+        has_metadata = any(
+            (
+                event.subtask_name,
+                event.agent,
+                event.objective,
+                event.attempt,
+                event.review_criteria,
+            )
         )
-        st.caption(f"Score: {task.review.score:.0%}")
-        for issue in task.review.issues:
-            st.markdown(f"- {issue}")
+        if has_metadata:
+            with st.container(key=f"workflow-meta-{event.id}"):
+                st.caption("Run details")
+
+                if event.subtask_name or event.agent:
+                    assignment = " · ".join(
+                        value
+                        for value in (event.subtask_name, event.agent)
+                        if value
+                    )
+                    st.markdown(f"**{assignment}**")
+                if event.objective:
+                    st.caption("Objective")
+                    st.write(event.objective)
+                if event.attempt is not None:
+                    retries = event.retry_count or 0
+                    st.caption(
+                        f"Attempt {event.attempt} · {retries} retries"
+                    )
+                if event.review_criteria:
+                    st.caption("Review criteria")
+                    st.markdown(
+                        "\n".join(
+                            f"- {criterion}"
+                            for criterion in event.review_criteria
+                        )
+                    )
+
+        if event.content or event.details or event.sources:
+            st.caption(_event_content_label(event.kind))
+            if event.content:
+                st.markdown(event.content)
+            for detail in event.details:
+                st.markdown(f"- {detail}")
+
+            if event.sources:
+                st.markdown("**Sources**")
+                for source in event.sources:
+                    st.link_button(
+                        source.title,
+                        source.url,
+                        icon=":material/open_in_new:",
+                        key=f"workflow-source-{event.id}-{source.url}",
+                    )
+                    if source.snippet:
+                        st.caption(source.snippet)
+
+
+def _event_content_label(kind: str) -> str:
+    """Name the primary artifact separately from execution metadata."""
+    return {
+        "plan": "Plan",
+        "search": "Search query",
+        "research": "Research output",
+        "analysis": "Analysis output",
+        "draft": "Draft",
+        "review": "Review result",
+        "replan": "Revised plan",
+        "memory": "Memory change",
+    }[kind]
+
+
+def _decision_badge(decision: str) -> tuple[str, str]:
+    """Map stored workflow decisions to explicit, consistent badges."""
+    badges = {
+        "pass": ("Passed", "green"),
+        "return": ("Passed", "green"),
+        "retry": ("Retry", "orange"),
+        "replan": ("Replan", "yellow"),
+        "escalate": ("Escalated", "red"),
+        "add": ("Added", "green"),
+        "edit": ("Updated", "blue"),
+        "delete": ("Deleted", "red"),
+    }
+    return badges.get(decision, (decision.replace("_", " ").title(), "gray"))
 
 
 def _relative_time(value: datetime) -> str:

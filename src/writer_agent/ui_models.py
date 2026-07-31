@@ -89,9 +89,17 @@ class WorkflowEventView(BaseModel):
     id: str
     kind: WorkflowEventKind
     title: str
+    created_at: datetime
     content: str = ""
     details: list[str] = Field(default_factory=list)
     decision: str = ""
+    subtask_name: str = ""
+    objective: str = ""
+    agent: str = ""
+    review_criteria: list[str] = Field(default_factory=list)
+    attempt: int | None = Field(default=None, ge=1)
+    retry_count: int | None = Field(default=None, ge=0)
+    sources: list[SourceView] = Field(default_factory=list)
 
 
 class TaskView(BaseModel):
@@ -310,6 +318,7 @@ def workflow_events_from_state(
                 id=event_id,
                 kind=raw_event.get("kind"),
                 title=str(raw_event.get("title") or "").strip(),
+                created_at=raw_event.get("created_at"),
                 content=str(raw_event.get("content") or "").strip(),
                 details=[
                     str(item).strip()
@@ -317,6 +326,19 @@ def workflow_events_from_state(
                     if str(item).strip()
                 ],
                 decision=str(raw_event.get("decision") or "").strip(),
+                subtask_name=str(
+                    raw_event.get("subtask_name") or ""
+                ).strip(),
+                objective=str(raw_event.get("objective") or "").strip(),
+                agent=str(raw_event.get("agent") or "").strip(),
+                review_criteria=[
+                    str(item).strip()
+                    for item in raw_event.get("review_criteria", [])
+                    if str(item).strip()
+                ],
+                attempt=raw_event.get("attempt"),
+                retry_count=raw_event.get("retry_count"),
+                sources=_safe_event_sources(raw_event.get("sources", [])),
             )
         except (TypeError, ValueError):
             continue
@@ -325,6 +347,23 @@ def workflow_events_from_state(
         seen_ids.add(event.id)
         events.append(event)
     return events
+
+
+def _safe_event_sources(raw_sources: list[dict]) -> list[SourceView]:
+    """Validate and de-duplicate source links attached to one event."""
+    sources: list[SourceView] = []
+    seen_urls: set[str] = set()
+    for raw_source in raw_sources:
+        url = str(raw_source.get("url") or "").strip()
+        if not url.startswith(("https://", "http://")) or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        title = str(raw_source.get("title") or url).strip()
+        snippet = str(raw_source.get("snippet") or "").strip()
+        sources.append(
+            SourceView(title=title or url, url=url, snippet=snippet)
+        )
+    return sources
 
 
 def projection_from_state(state: SupervisorState) -> TaskProjection:

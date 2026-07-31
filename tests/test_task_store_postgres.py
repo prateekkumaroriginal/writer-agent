@@ -2,6 +2,7 @@
 
 import os
 import unittest
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import psycopg
@@ -51,6 +52,7 @@ class TaskStorePostgresTests(unittest.TestCase):
                             "id": "event-1",
                             "kind": "plan",
                             "title": "Initial plan",
+                            "created_at": datetime.now(UTC).isoformat(),
                             "content": "Write and review.",
                         }
                     ],

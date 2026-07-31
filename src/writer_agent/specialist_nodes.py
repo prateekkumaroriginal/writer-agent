@@ -41,6 +41,30 @@ from writer_agent.workflow_events import workflow_event
 MIN_RESEARCH_PASS_CONFIDENCE = 0.60
 
 
+def _subtask_workflow_fields(
+    subtask: Subtask,
+    state: SupervisorState,
+) -> dict:
+    """Return consistent user-facing metadata for a subtask event."""
+    labels = {
+        "research": ("Research task", "Research agent"),
+        "data": ("Analysis task", "Data agent"),
+        "writing": ("Writing task", "Writing agent"),
+    }
+    subtask_name, agent = labels[subtask["agent_type"]]
+    retry_count = int(subtask.get("retry_count", 0))
+    if subtask["agent_type"] == "writing":
+        retry_count += int(state.get("final_retry_count", 0))
+    return {
+        "subtask_name": subtask_name,
+        "objective": subtask.get("objective", ""),
+        "agent": agent,
+        "review_criteria": list(subtask.get("review_criteria", [])),
+        "attempt": retry_count + 1,
+        "retry_count": retry_count,
+    }
+
+
 def pick_next_subtask(state: SupervisorState) -> SupervisorState:
     """Select and start the first pending subtask."""
     for subtask in state.get("subtasks", []):
@@ -136,6 +160,7 @@ def _retry_feedback_for_subtask(
 
 
 def _review_workflow_event(
+    state: SupervisorState,
     subtask: Subtask | None,
     report: ReviewReport,
 ):
@@ -165,6 +190,7 @@ def _review_workflow_event(
             *report.get("issues", []),
         ],
         decision=action,
+        **(_subtask_workflow_fields(subtask, state) if subtask else {}),
     )
 
 
@@ -190,6 +216,7 @@ def research_agent(state: SupervisorState) -> SupervisorState:
             "search",
             "Web search",
             content=query,
+            **_subtask_workflow_fields(subtask, state),
         )
     ]
     retry_feedback = _retry_feedback_for_subtask(state, subtask)
@@ -259,6 +286,8 @@ Reviewer feedback from previous attempts:
                     ],
                     f"Sources gathered: {len(search_results)}",
                 ],
+                sources=search_results,
+                **_subtask_workflow_fields(subtask, state),
             )
         )
     except Exception as exc:
@@ -325,6 +354,7 @@ Passed research context:
                 "analysis",
                 "Analysis response",
                 content=response.content,
+                **_subtask_workflow_fields(subtask, state),
             )
         ]
     except Exception as exc:
@@ -411,6 +441,7 @@ Final-review revision feedback:
                         for item in revision_feedback
                     ]
                 ],
+                **_subtask_workflow_fields(subtask, state),
             )
         ]
     except Exception as exc:
@@ -448,7 +479,7 @@ def review_agent(state: SupervisorState) -> SupervisorState:
         return {
             "status": "reviewing",
             "review_reports": [report],
-            "workflow_events": [_review_workflow_event(None, report)],
+            "workflow_events": [_review_workflow_event(state, None, report)],
             "escalation_reason": "Reviewer could not find current subtask.",
         }
 
@@ -465,7 +496,7 @@ def review_agent(state: SupervisorState) -> SupervisorState:
             "status": "reviewing",
             "review_reports": [report],
             "workflow_events": [
-                _review_workflow_event(subtask, report)
+                _review_workflow_event(state, subtask, report)
             ],
         }
 
@@ -485,7 +516,7 @@ def review_agent(state: SupervisorState) -> SupervisorState:
             "status": "reviewing",
             "review_reports": [report],
             "workflow_events": [
-                _review_workflow_event(subtask, report)
+                _review_workflow_event(state, subtask, report)
             ],
         }
 
@@ -525,7 +556,7 @@ Specialist result:
     return {
         "status": "reviewing",
         "review_reports": [report],
-        "workflow_events": [_review_workflow_event(subtask, report)],
+        "workflow_events": [_review_workflow_event(state, subtask, report)],
     }
 
 

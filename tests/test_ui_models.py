@@ -1,6 +1,7 @@
 """Tests for the sanitized Streamlit view-model projection."""
 
 import unittest
+from datetime import UTC, datetime
 
 from writer_agent.ui_models import (
     projection_from_state,
@@ -134,17 +135,25 @@ class TaskProjectionTests(unittest.TestCase):
                         "id": "event-1",
                         "kind": "search",
                         "title": "Web search",
+                        "created_at": "2026-07-31T08:30:00+00:00",
                         "content": "relevant query",
                     },
                     {
                         "id": "event-1",
                         "kind": "search",
                         "title": "Duplicate",
+                        "created_at": "2026-07-31T08:31:00+00:00",
                     },
                     {
                         "id": "event-2",
                         "kind": "hidden_reasoning",
                         "title": "Unsafe internal event",
+                        "created_at": "2026-07-31T08:32:00+00:00",
+                    },
+                    {
+                        "id": "event-3",
+                        "kind": "plan",
+                        "title": "Event without required timestamp",
                     },
                 ]
             }
@@ -161,6 +170,7 @@ class TaskProjectionTests(unittest.TestCase):
                         "id": "memory-event-1",
                         "kind": "memory",
                         "title": "Memory updated",
+                        "created_at": "2026-07-31T08:30:00+00:00",
                         "content": "Use US English.",
                         "details": ["Previous: Use British English."],
                         "decision": "edit",
@@ -172,6 +182,50 @@ class TaskProjectionTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].kind, "memory")
         self.assertIn("US English", events[0].content)
+
+    def test_workflow_event_exposes_safe_execution_metadata(self):
+        timestamp = datetime(2026, 7, 31, 8, 30, tzinfo=UTC)
+        events = workflow_events_from_state(
+            {
+                "workflow_events": [
+                    {
+                        "id": "research-event-1",
+                        "kind": "research",
+                        "title": "Research response",
+                        "created_at": timestamp.isoformat(),
+                        "subtask_name": "Research task",
+                        "objective": "Find supporting evidence.",
+                        "agent": "Research agent",
+                        "review_criteria": ["Uses authoritative sources"],
+                        "attempt": 2,
+                        "retry_count": 1,
+                        "sources": [
+                            {
+                                "title": "Evidence",
+                                "url": "https://example.com/evidence",
+                                "snippet": "Relevant evidence.",
+                            },
+                            {
+                                "title": "Unsafe",
+                                "url": "javascript:alert(1)",
+                            },
+                        ],
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(len(events), 1)
+        event = events[0]
+        self.assertEqual(event.created_at, timestamp)
+        self.assertEqual(event.subtask_name, "Research task")
+        self.assertEqual(event.objective, "Find supporting evidence.")
+        self.assertEqual(event.agent, "Research agent")
+        self.assertEqual(event.review_criteria, ["Uses authoritative sources"])
+        self.assertEqual(event.attempt, 2)
+        self.assertEqual(event.retry_count, 1)
+        self.assertEqual(len(event.sources), 1)
+        self.assertEqual(event.sources[0].title, "Evidence")
 
 
 if __name__ == "__main__":
