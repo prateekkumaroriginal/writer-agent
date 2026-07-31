@@ -17,6 +17,10 @@ The project currently includes:
 - durable recent-task history and checkpoint resume
 - multi-turn conversations with immutable answer versions
 - supervisor-selected specialist reuse for efficient revisions
+- durable core preferences in PostgreSQL
+- relevant contextual-memory retrieval through ChromaDB
+- agent-managed durable-memory add, edit, and delete operations
+- transparent memory-mutation events in each task's workflow
 
 ## Requirements
 
@@ -51,6 +55,7 @@ TAVILY_API_KEY=your_tavily_api_key
 DATABASE_URL=postgresql://writer_agent:writer_agent_dev@localhost:5432/writer_agent?sslmode=disable
 LANGGRAPH_STRICT_MSGPACK=true
 WRITER_AGENT_USER_ID=local-user
+WRITER_AGENT_CHROMA_PATH=.writer_agent/chroma
 ```
 
 Start PostgreSQL:
@@ -91,6 +96,8 @@ override it. `WRITER_AGENT_USER_ID` is optional and defaults to `local-user`.
 `GROQ_MODEL` is optional and defaults to `openai/gpt-oss-120b`.
 Set `WRITER_AGENT_RUN_DIR` to store thread-named JSON run records somewhere
 other than `tests/runs`.
+Set `WRITER_AGENT_CHROMA_PATH` to move the local contextual-memory index
+somewhere other than `.writer_agent/chroma`.
 
 ## Python API
 
@@ -110,7 +117,9 @@ print(result["status"])
 print(result["final_answer"])
 ```
 
-Use a new thread ID for each new request.
+Use a new thread ID for each new request. When `user_id` and `user_request` are
+present, the runtime automatically lets the memory agent manage and retrieve
+that user's durable memory before starting the graph.
 
 ## UI architecture
 
@@ -131,6 +140,23 @@ creates a new checkpoint thread linked to its parent run. The supervisor plans
 the revision from the previous effective request, reviewed answer, and passed
 specialist artifacts; only artifacts explicitly selected for reuse are copied
 into the new run.
+
+## Long-term memory
+
+Writer Agent stores durable memories separately from LangGraph checkpoints.
+Bounded core writing preferences are read from PostgreSQL for every new run.
+Contextual facts and preferences are selected by vector similarity from the
+local ChromaDB index. Only the resulting bounded snapshot is passed into the
+workflow.
+
+The app extracts only explicit, durable user-provided facts and recurring
+preferences. One-off task and revision instructions remain in conversation
+context. The memory agent alone decides whether to add, edit, or delete a
+memory. Every successful mutation appears chronologically in the task's
+**Workflow** tab with the affected content. The sidebar’s read-only
+**Saved memory** section shows the current user’s stored memories without
+exposing mutation controls. PostgreSQL is authoritative; the ChromaDB index is
+rebuilt from it when the service starts.
 
 ## Test
 

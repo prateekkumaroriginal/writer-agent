@@ -261,6 +261,10 @@ without overwriting checkpoint history or blindly rerunning every specialist.
 
 ## Phase 3B — Long-Term Memory
 
+### Status
+
+Implemented with ChromaDB replacing the originally planned pgvector index.
+
 ### Goal
 
 Add durable memory after checkpointing and multi-turn iteration are stable.
@@ -273,7 +277,7 @@ Add durable memory after checkpointing and multi-turn iteration are stable.
 ### Planned storage
 
 - PostgreSQL tables for structured memory
-- pgvector for contextual semantic retrieval
+- ChromaDB for contextual vector retrieval
 
 ### Rules
 
@@ -283,7 +287,10 @@ Add durable memory after checkpointing and multi-turn iteration are stable.
 - Save only durable user-provided facts and preferences.
 - Activate saved memories automatically for all of the user's writing.
 - Keep one-off revision instructions in conversation context, not memory.
-- Provide memory inspection, editing, and deletion as recovery controls.
+- Let the memory agent add, edit, or delete memory from explicit user messages.
+- Show every successful memory mutation and its affected content in the
+  chronological workflow UI.
+- Provide a user-scoped, read-only view of currently stored memories.
 
 ## Phase 4 — Human-in-the-Loop
 

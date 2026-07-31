@@ -7,8 +7,10 @@ from unittest.mock import Mock, patch
 from writer_agent.streamlit_ui import (
     APP_CSS,
     NEW_TASK_LABEL,
+    _render_memory_list,
     _render_task_navigation,
     _render_supporting_details,
+    render_sidebar,
     render_task_body,
 )
 from writer_agent.ui_models import TaskSummary, TaskView, steps_for_stage
@@ -49,6 +51,23 @@ class SidebarNavigationTests(unittest.TestCase):
             '.stButton > [data-testid="stBaseButton-primary"]',
             APP_CSS,
         )
+
+    def test_sidebar_has_no_manual_memory_controls(self):
+        import inspect
+
+        source = inspect.getsource(render_sidebar)
+
+        self.assertNotIn("add_memory", source)
+        self.assertNotIn("update_memory", source)
+        self.assertNotIn("delete_memory", source)
+        self.assertNotIn("_render_memory_controls", source)
+
+        memory_source = inspect.getsource(_render_memory_list)
+        self.assertIn("list_memories", memory_source)
+        self.assertNotIn("st.button", memory_source)
+        self.assertNotIn("st.form", memory_source)
+        self.assertNotIn("st.selectbox", memory_source)
+        self.assertNotIn("st.text_area", memory_source)
 
     def test_supporting_details_has_no_separate_review_tab(self):
         import inspect

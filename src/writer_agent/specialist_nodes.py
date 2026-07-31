@@ -10,6 +10,7 @@ from writer_agent.helpers import (
     format_upstream_specialist_brief,
     get_current_subtask,
     previous_answer_context,
+    relevant_memory_context,
     update_subtask,
 )
 from writer_agent.model import llm
@@ -36,6 +37,8 @@ from writer_agent.state import (
     SupervisorState,
 )
 from writer_agent.workflow_events import workflow_event
+
+MIN_RESEARCH_PASS_CONFIDENCE = 0.60
 
 
 def pick_next_subtask(state: SupervisorState) -> SupervisorState:
@@ -94,6 +97,9 @@ def build_search_query(state: SupervisorState, subtask: Subtask) -> str:
                 content=f"""
 User request:
 {effective_request(state)}
+
+Relevant saved memories:
+{relevant_memory_context(state)}
 
 Research objective:
 {subtask["objective"]}
@@ -199,6 +205,9 @@ def research_agent(state: SupervisorState) -> SupervisorState:
 User request:
 {effective_request(state)}
 
+Relevant saved memories:
+{relevant_memory_context(state)}
+
 Research task:
 Objective:
 {subtask["objective"]}
@@ -291,6 +300,9 @@ def data_agent(state: SupervisorState) -> SupervisorState:
 User request:
 {effective_request(state)}
 
+Relevant saved memories:
+{relevant_memory_context(state)}
+
 Data task:
 {format_subtask_brief(subtask)}
 
@@ -362,6 +374,9 @@ def writing_agent(state: SupervisorState) -> SupervisorState:
 User request:
 {effective_request(state)}
 
+Relevant saved memories:
+{relevant_memory_context(state)}
+
 Writing task:
 {format_subtask_brief(subtask)}
 
@@ -421,7 +436,6 @@ Final-review revision feedback:
 
 def review_agent(state: SupervisorState) -> SupervisorState:
     """Evaluate the current specialist result and record a recovery action."""
-    reviewer_llm = llm.with_structured_output(ReviewDecisionSchema)
     subtask = get_current_subtask(state)
     if subtask is None:
         report: ReviewReport = {
@@ -455,6 +469,27 @@ def review_agent(state: SupervisorState) -> SupervisorState:
             ],
         }
 
+    result_confidence = float(result.get("confidence", 0.0))
+    if (
+        subtask["agent_type"] == "research"
+        and result_confidence >= MIN_RESEARCH_PASS_CONFIDENCE
+    ):
+        report = {
+            "subtask_id": subtask["id"],
+            "passed": True,
+            "score": result_confidence,
+            "issues": [],
+            "action": "pass",
+        }
+        return {
+            "status": "reviewing",
+            "review_reports": [report],
+            "workflow_events": [
+                _review_workflow_event(subtask, report)
+            ],
+        }
+
+    reviewer_llm = llm.with_structured_output(ReviewDecisionSchema)
     try:
         decision = reviewer_llm.invoke(
             [

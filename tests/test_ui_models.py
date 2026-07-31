@@ -153,6 +153,26 @@ class TaskProjectionTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].content, "relevant query")
 
+    def test_memory_mutation_event_is_exposed(self):
+        events = workflow_events_from_state(
+            {
+                "workflow_events": [
+                    {
+                        "id": "memory-event-1",
+                        "kind": "memory",
+                        "title": "Memory updated",
+                        "content": "Use US English.",
+                        "details": ["Previous: Use British English."],
+                        "decision": "edit",
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].kind, "memory")
+        self.assertIn("US English", events[0].content)
+
 
 if __name__ == "__main__":
     unittest.main()

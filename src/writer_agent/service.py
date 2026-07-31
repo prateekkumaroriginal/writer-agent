@@ -8,6 +8,12 @@ from os import getenv
 from threading import Lock
 from uuid import uuid4
 
+from writer_agent.memory import (
+    MemoryStore,
+    MemoryView,
+    manage_durable_memories,
+    memory_events_for_mutations,
+)
 from writer_agent.persistence import PersistentWriterAgent
 from writer_agent.provider_errors import RetryableProviderError
 from writer_agent.run_records import record_run
@@ -30,10 +36,12 @@ class TaskRunner:
         store: PostgresTaskStore,
         database_url: str,
         *,
+        memory_store: MemoryStore | None = None,
         max_workers: int = 1,
     ) -> None:
         self._store = store
         self._database_url = database_url
+        self._memory_store = memory_store
         self._executor = ThreadPoolExecutor(
             max_workers=max_workers,
             thread_name_prefix="writer-agent",
@@ -91,12 +99,36 @@ class TaskRunner:
                         metadata=metadata,
                     )
                 else:
+                    memory_context = "No relevant saved memories."
+                    memory_events = []
+                    if self._memory_store is not None:
+                        try:
+                            mutations = manage_durable_memories(
+                                self._memory_store,
+                                user_id=task.user_id,
+                                user_message=task.request,
+                                source_task_id=task.id,
+                            )
+                            memory_events = memory_events_for_mutations(
+                                mutations
+                            )
+                            memory_context = self._memory_store.format_context(
+                                user_id=task.user_id,
+                                query=task.request,
+                            )
+                        except Exception:
+                            # Memory is useful context, never a prerequisite for
+                            # completing the user's writing task.
+                            memory_context = "No relevant saved memories."
+                            memory_events = []
                     initial_state = {
                         "user_id": task.user_id,
                         "user_request": task.request,
                         "conversation_id": task.conversation_id,
                         "turn_number": task.turn_number,
                         "planning_mode": "initial",
+                        "memory_context": memory_context,
+                        "workflow_events": memory_events,
                     }
                     revision_base = self._find_revision_base(task)
                     if revision_base is not None:
@@ -194,9 +226,12 @@ class WriterAgentService:
         self._store = PostgresTaskStore(database_url)
         self._store.setup()
         self._store.recover_orphaned()
+        self._memory_store = MemoryStore(database_url)
+        self._memory_store.setup()
         self._runner = TaskRunner(
             self._store,
             database_url,
+            memory_store=self._memory_store,
             max_workers=max_workers,
         )
         self._closed = False
@@ -280,6 +315,12 @@ class WriterAgentService:
         self._runner.submit(task.id, resume=True)
         return task
 
+    def list_memories(self, *, limit: int = 50) -> list[MemoryView]:
+        """Return a bounded, read-only view of the current user's memory."""
+        if not 1 <= limit <= 100:
+            raise ValueError("Memory list limit must be between 1 and 100.")
+        return self._memory_store.list(self.user_id, limit=limit)
+
     def retry_task(
         self,
         task_id: str,
@@ -302,5 +343,6 @@ class WriterAgentService:
         if self._closed:
             return
         self._runner.close()
+        self._memory_store.close()
         self._store.close()
         self._closed = True

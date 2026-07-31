@@ -42,6 +42,10 @@ def initialise_task(state: SupervisorState) -> SupervisorState:
         "user_id": state.get("user_id"),
         "user_request": state.get("user_request", ""),
         "effective_request": state.get("user_request", ""),
+        "memory_context": state.get(
+            "memory_context",
+            "No relevant saved memories.",
+        ),
         "run_metadata": dict(state.get("run_metadata", {})),
         "planning_mode": state.get("planning_mode", "initial"),
         "previous_effective_request": state.get(
@@ -63,7 +67,7 @@ def initialise_task(state: SupervisorState) -> SupervisorState:
         "subtask_results": {},
         "review_reports": [],
         "final_review": None,
-        "workflow_events": [],
+        "workflow_events": list(state.get("workflow_events", [])),
         "max_retries": DEFAULT_MAX_RETRIES,
         "final_retry_count": 0,
         "max_final_retries": DEFAULT_MAX_FINAL_RETRIES,
@@ -80,12 +84,25 @@ def initialise_task(state: SupervisorState) -> SupervisorState:
 def _initial_planning_request(state: SupervisorState, request: str) -> str:
     """Build the initial/replan request while preserving existing behavior."""
     replan_feedback = state.get("replan_feedback", [])
+    memory_context = state.get(
+        "memory_context",
+        "No relevant saved memories.",
+    )
     if not replan_feedback:
-        return request
+        return f"""
+User request:
+{request}
+
+Relevant saved memories:
+{memory_context}
+""".strip()
     feedback_text = "\n".join(f"- {issue}" for issue in replan_feedback)
     return f"""
 User request:
 {request}
+
+Relevant saved memories:
+{memory_context}
 
 Replanning feedback from the reviewer:
 {feedback_text}
@@ -182,6 +199,9 @@ Available passed artifacts:
 
 New user message:
 {state.get("user_request")}
+
+Relevant saved memories:
+{state.get("memory_context") or "No relevant saved memories."}
 
 Reviewer feedback for replanning:
 {chr(10).join(f"- {item}" for item in feedback) if feedback else "None"}

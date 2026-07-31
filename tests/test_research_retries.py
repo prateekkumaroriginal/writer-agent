@@ -2,16 +2,18 @@
 
 import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from langchain_core.messages import HumanMessage
 
 from writer_agent.parent_nodes import route_after_specialists
-from writer_agent.schemas import SearchQuerySchema
+from writer_agent.prompts import REVIEWER_SYSTEM_PROMPT
+from writer_agent.schemas import ReviewDecisionSchema, SearchQuerySchema
 from writer_agent.search import search_web
 from writer_agent.specialist_nodes import (
     build_search_query,
     mark_subtask_failed,
+    review_agent,
     route_after_subtask_review,
 )
 
@@ -51,6 +53,68 @@ class FakeLLM:
 
 
 class ResearchRetryTests(unittest.TestCase):
+    def test_research_at_60_percent_confidence_must_pass(self):
+        state = {
+            "current_subtask_id": "s1",
+            "subtasks": [research_subtask()],
+            "subtask_results": {
+                "s1": {
+                    "subtask_id": "s1",
+                    "agent_type": "research",
+                    "output": {"summary": "Limited research."},
+                    "confidence": 0.60,
+                    "sources": [],
+                    "errors": [],
+                }
+            },
+        }
+
+        with patch("writer_agent.specialist_nodes.llm", object()):
+            result = review_agent(state)
+
+        report = result["review_reports"][0]
+        self.assertTrue(report["passed"])
+        self.assertEqual(report["score"], 0.60)
+        self.assertEqual(report["action"], "pass")
+        self.assertEqual(report["issues"], [])
+
+    def test_reviewer_prompt_documents_research_threshold(self):
+        self.assertIn("greater", REVIEWER_SYSTEM_PROMPT)
+        self.assertIn("0.60", REVIEWER_SYSTEM_PROMPT)
+        self.assertIn("overrides", REVIEWER_SYSTEM_PROMPT)
+
+    def test_research_below_60_percent_still_uses_reviewer(self):
+        state = {
+            "current_subtask_id": "s1",
+            "subtasks": [research_subtask()],
+            "subtask_results": {
+                "s1": {
+                    "subtask_id": "s1",
+                    "agent_type": "research",
+                    "output": {"summary": "Insufficient research."},
+                    "confidence": 0.599,
+                    "sources": [],
+                    "errors": [],
+                }
+            },
+        }
+        fake_llm = Mock()
+        fake_llm.with_structured_output.return_value.invoke.return_value = (
+            ReviewDecisionSchema(
+                passed=False,
+                score=0.599,
+                issues=["Evidence is incomplete."],
+                action="retry",
+            )
+        )
+
+        with patch("writer_agent.specialist_nodes.llm", fake_llm):
+            result = review_agent(state)
+
+        self.assertFalse(result["review_reports"][0]["passed"])
+        self.assertEqual(result["review_reports"][0]["action"], "retry")
+        fake_llm.with_structured_output.return_value.invoke.assert_called_once()
+
     def test_search_query_receives_latest_reviewer_feedback(self):
         captured = []
         subtask = research_subtask(retry_count=1)
@@ -124,7 +188,7 @@ class ResearchRetryTests(unittest.TestCase):
         self.assertEqual(failed["status"], "escalated")
         self.assertEqual(route_after_specialists(failed), "escalate")
 
-    def test_search_requests_eight_results(self):
+    def test_search_requests_five_results(self):
         captured = {}
 
         class FakeClient:
@@ -141,7 +205,7 @@ class ResearchRetryTests(unittest.TestCase):
         ):
             search_web("credible protest sources")
 
-        self.assertEqual(captured["max_results"], 8)
+        self.assertEqual(captured["max_results"], 5)
 
 
 if __name__ == "__main__":

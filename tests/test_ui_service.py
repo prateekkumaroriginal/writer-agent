@@ -5,8 +5,9 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from writer_agent.service import TaskRunner, WriterAgentService
+from writer_agent.memory import MemoryMutation, MemoryView
 from writer_agent.provider_errors import RetryableProviderError
+from writer_agent.service import TaskRunner, WriterAgentService
 from writer_agent.ui_models import TaskView, steps_for_stage
 
 
@@ -147,6 +148,66 @@ class TaskRunnerTests(unittest.TestCase):
         self.assertEqual(len(store.states), 1)
         self.assertEqual(store.states[0][1]["status"], "completed")
         self.assertFalse(store.failed)
+
+    def test_runner_injects_only_retrieved_memory_snapshot(self):
+        class CapturingRuntime(SuccessfulRuntime):
+            started_state = None
+
+            def start_stream(self, thread_id, state, *, on_state, metadata):
+                type(self).started_state = state
+                return super().start_stream(
+                    thread_id,
+                    state,
+                    on_state=on_state,
+                    metadata=metadata,
+                )
+
+        class FakeMemoryStore:
+            def format_context(self, **kwargs):
+                self.retrieval = kwargs
+                return "- [core] The user prefers British English."
+
+        store = FakeStore()
+        memory_store = FakeMemoryStore()
+        runner = TaskRunner(
+            store,
+            "postgresql://test",
+            memory_store=memory_store,
+        )
+        now = datetime.now(UTC)
+        mutation = MemoryMutation(
+            action="add",
+            current=MemoryView(
+                id="memory-1",
+                kind="core",
+                content="The user prefers British English.",
+                created_at=now,
+                updated_at=now,
+            ),
+        )
+        with (
+            patch(
+                "writer_agent.service.PersistentWriterAgent",
+                CapturingRuntime,
+            ),
+            patch(
+                "writer_agent.service.manage_durable_memories",
+                return_value=[mutation],
+            ) as capture,
+        ):
+            runner._run(store.task.id, False)
+        runner.close()
+
+        capture.assert_called_once()
+        self.assertEqual(
+            CapturingRuntime.started_state["memory_context"],
+            "- [core] The user prefers British English.",
+        )
+        self.assertEqual(memory_store.retrieval["query"], store.task.request)
+        self.assertEqual(
+            CapturingRuntime.started_state["workflow_events"][0]["title"],
+            "Memory added",
+        )
 
     def test_revision_runner_loads_parent_checkpoint_artifacts(self):
         now = datetime.now(UTC)
@@ -430,6 +491,26 @@ class ServiceValidationTests(unittest.TestCase):
     def test_short_follow_up_is_rejected_before_storage(self):
         with self.assertRaisesRegex(ValueError, "at least 3"):
             self.service.create_follow_up("task-1", "x")
+
+    def test_read_only_memory_list_is_scoped_and_bounded(self):
+        expected = [SimpleNamespace(id="memory-1")]
+
+        class Store:
+            def list(self, user_id, *, limit):
+                self.arguments = (user_id, limit)
+                return expected
+
+        self.service._memory_store = Store()
+
+        result = self.service.list_memories(limit=12)
+
+        self.assertEqual(result, expected)
+        self.assertEqual(
+            self.service._memory_store.arguments,
+            ("local-user", 12),
+        )
+        with self.assertRaisesRegex(ValueError, "between 1 and 100"):
+            self.service.list_memories(limit=101)
 
     def test_follow_up_is_persisted_and_scheduled(self):
         task = queued_task().model_copy(

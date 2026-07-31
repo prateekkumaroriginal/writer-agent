@@ -23,6 +23,7 @@ tests/runs/
 
 # Local artifacts
 .html/
+.writer_agent/
 
 # OS and editor files
 .DS_Store

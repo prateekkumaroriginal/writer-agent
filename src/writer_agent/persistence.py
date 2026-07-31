@@ -14,6 +14,11 @@ from langgraph.types import StateSnapshot
 from psycopg.rows import dict_row
 
 from writer_agent.graph import build_supervisor_graph
+from writer_agent.memory import (
+    MemoryStore,
+    manage_durable_memories,
+    memory_events_for_mutations,
+)
 from writer_agent.state import SupervisorState
 
 
@@ -40,6 +45,7 @@ class PersistentWriterAgent:
         self,
         database_url: str | None = None,
         *,
+        memory_store: MemoryStore | None = None,
         interrupt_before: Sequence[str] | None = None,
         interrupt_after: Sequence[str] | None = None,
     ) -> None:
@@ -50,6 +56,9 @@ class PersistentWriterAgent:
                 "DATABASE_URL is required for Postgres checkpointing."
             )
 
+        self._database_url = resolved_url
+        self._memory_store = memory_store
+        self._owns_memory_store = False
         self._connection = psycopg.connect(
             resolved_url,
             autocommit=True,
@@ -86,8 +95,9 @@ class PersistentWriterAgent:
             "started_at": datetime.now(UTC).isoformat(),
             **dict(metadata or {}),
         }
+        prepared_state = self._with_memory_context(state)
         initial_state: SupervisorState = {
-            **state,
+            **prepared_state,
             "thread_id": thread_id.strip(),
             "run_metadata": run_metadata,
         }
@@ -112,8 +122,9 @@ class PersistentWriterAgent:
             "started_at": datetime.now(UTC).isoformat(),
             **dict(metadata or {}),
         }
+        prepared_state = self._with_memory_context(state)
         initial_state: SupervisorState = {
-            **state,
+            **prepared_state,
             "thread_id": thread_id.strip(),
             "run_metadata": run_metadata,
         }
@@ -180,9 +191,53 @@ class PersistentWriterAgent:
         on_state(final_state)
         return final_state
 
+    def _with_memory_context(
+        self,
+        state: SupervisorState,
+    ) -> SupervisorState:
+        """Lazily activate memory for direct Python API callers."""
+        if state.get("memory_context"):
+            return state
+        user_id = state.get("user_id")
+        user_request = state.get("user_request")
+        if not user_id or not user_request:
+            return {
+                **state,
+                "memory_context": "No relevant saved memories.",
+            }
+        try:
+            if self._memory_store is None:
+                self._memory_store = MemoryStore(self._database_url)
+                self._owns_memory_store = True
+                self._memory_store.setup()
+            mutations = manage_durable_memories(
+                self._memory_store,
+                user_id=user_id,
+                user_message=user_request,
+                source_task_id=None,
+            )
+            memory_events = memory_events_for_mutations(mutations)
+            memory_context = self._memory_store.format_context(
+                user_id=user_id,
+                query=user_request,
+            )
+        except Exception:
+            memory_context = "No relevant saved memories."
+            memory_events = []
+        return {
+            **state,
+            "memory_context": memory_context,
+            "workflow_events": [
+                *state.get("workflow_events", []),
+                *memory_events,
+            ],
+        }
+
     def close(self) -> None:
         """Close the Postgres connection owned by this runtime."""
         if not self._closed:
+            if self._owns_memory_store and self._memory_store is not None:
+                self._memory_store.close()
             self._connection.close()
             self._closed = True
 

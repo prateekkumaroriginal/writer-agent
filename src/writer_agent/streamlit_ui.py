@@ -89,6 +89,26 @@ h1 { letter-spacing: -0.04em; }
   letter-spacing: 0.1em;
   text-transform: uppercase;
 }
+.wa-memory-item {
+  padding: 0.68rem 0.75rem;
+  margin: 0.42rem 0;
+  border: 1px solid var(--wa-border);
+  border-radius: 0.55rem;
+  background: #171720;
+}
+.wa-memory-kind {
+  margin-bottom: 0.2rem;
+  color: #b7b7ff;
+  font-size: 0.64rem;
+  font-weight: 760;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.wa-memory-content {
+  color: #dddde7;
+  font-size: 0.82rem;
+  line-height: 1.42;
+}
 
 .wa-hero {
   max-width: 820px;
@@ -334,6 +354,7 @@ def render_sidebar(
             st.query_params.clear()
             st.rerun()
 
+        _render_memory_list(service)
         st.html('<div class="wa-section-label">Recent work</div>')
         try:
             recent_tasks = service.list_recent_tasks()
@@ -347,6 +368,39 @@ def render_sidebar(
 
         for task in recent_tasks:
             _render_task_navigation(task, active_task_id=active_task_id)
+
+
+def _render_memory_list(service: WriterAgentService) -> None:
+    """Render the current user's memories without mutation controls."""
+    with st.expander("Saved memory"):
+        st.caption(
+            "Writer Agent manages these memories from your messages. Changes "
+            "appear in the relevant task’s Workflow tab."
+        )
+        try:
+            memories = service.list_memories()
+        except Exception:
+            st.caption("Saved memory is temporarily unavailable.")
+            return
+        if not memories:
+            st.caption("No long-term memories have been saved yet.")
+            return
+        for memory in memories:
+            label = (
+                "Core preference"
+                if memory.kind == "core"
+                else "Contextual memory"
+            )
+            st.html(
+                f"""
+                <div class="wa-memory-item">
+                  <div class="wa-memory-kind">{html.escape(label)}</div>
+                  <div class="wa-memory-content">
+                    {html.escape(memory.content)}
+                  </div>
+                </div>
+                """
+            )
 
 
 def _render_task_navigation(

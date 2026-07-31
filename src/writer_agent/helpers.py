@@ -109,6 +109,11 @@ def effective_request(state: SupervisorState) -> str:
     return state.get("effective_request") or state.get("user_request", "")
 
 
+def relevant_memory_context(state: SupervisorState) -> str:
+    """Return the bounded memory snapshot selected before this run."""
+    return state.get("memory_context") or "No relevant saved memories."
+
+
 def previous_answer_context(state: SupervisorState) -> str:
     """Return the prior reviewed answer only when the supervisor approved reuse."""
     if not state.get("reuse_previous_answer"):

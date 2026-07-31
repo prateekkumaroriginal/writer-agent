@@ -35,6 +35,7 @@ WorkflowEventKind: TypeAlias = Literal[
     "draft",
     "review",
     "replan",
+    "memory",
 ]
 WorkflowStatus: TypeAlias = Literal[
     "initialised",
@@ -115,6 +116,7 @@ class SupervisorState(TypedDict, total=False):
     user_id: str
     user_request: str
     effective_request: str
+    memory_context: str
     run_metadata: dict[str, Any]
     planning_mode: PlanningMode
 

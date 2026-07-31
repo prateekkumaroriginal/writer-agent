@@ -37,6 +37,7 @@ WorkflowEventKind = Literal[
     "draft",
     "review",
     "replan",
+    "memory",
 ]
 
 STAGE_DEFINITIONS: tuple[tuple[str, str], ...] = (
