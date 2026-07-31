@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import math
-import re
 from datetime import UTC, datetime
 from os import getenv
 from pathlib import Path
@@ -12,6 +10,7 @@ from typing import Literal
 from uuid import uuid4
 
 import chromadb
+from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 from langchain_core.messages import HumanMessage, SystemMessage
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
@@ -28,6 +27,9 @@ MAX_MEMORY_LENGTH = 500
 MAX_CORE_MEMORIES = 8
 MAX_CONTEXTUAL_MEMORIES = 5
 MAX_MEMORY_CONTEXT_CHARS = 4_000
+MAX_CONTEXTUAL_DISTANCE = 0.65
+CONTEXTUAL_EMBEDDING_MODEL = "chroma-default/all-MiniLM-L6-v2"
+INDEX_BATCH_SIZE = 100
 DEFAULT_CHROMA_PATH = ".writer_agent/chroma"
 
 MEMORY_TABLE_SQL = """
@@ -135,21 +137,9 @@ def _validate_content(content: str) -> str:
     return normalized
 
 
-def _embedding(text: str, *, dimensions: int = 384) -> list[float]:
-    """Create a deterministic local vector for Chroma without model downloads."""
-    values = [0.0] * dimensions
-    tokens = re.findall(r"[\w'-]+", text.casefold())
-    if not tokens:
-        tokens = [text]
-    for token in tokens:
-        digest = hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest()
-        index = int.from_bytes(digest[:4], "big") % dimensions
-        sign = 1.0 if digest[4] & 1 else -1.0
-        values[index] += sign
-    norm = math.sqrt(sum(value * value for value in values))
-    if not norm:
-        return values
-    return [value / norm for value in values]
+def _content_fingerprint(content: str) -> str:
+    """Identify the exact content represented by one vector record."""
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
 class MemoryStore:
@@ -178,8 +168,10 @@ class MemoryStore:
         path = Path(configured_path).expanduser().resolve()
         path.mkdir(parents=True, exist_ok=True)
         self._chroma = chromadb.PersistentClient(path=str(path))
+        self._embedding_function = DefaultEmbeddingFunction()
         self._collection = self._chroma.get_or_create_collection(
             name="writer_contextual_memories",
+            embedding_function=self._embedding_function,
             metadata={"hnsw:space": "cosine"},
         )
 
@@ -330,14 +322,20 @@ class MemoryStore:
         memories = [_memory_from_row(row) for row in core_rows]
         if query.strip():
             result = self._collection.query(
-                query_embeddings=[_embedding(query)],
+                query_texts=[query],
                 n_results=MAX_CONTEXTUAL_MEMORIES,
                 where={"user_id": user_id},
-                include=["metadatas"],
+                include=["metadatas", "distances"],
             )
             ids = (result.get("ids") or [[]])[0]
-            if ids:
-                memories.extend(self._get_many(user_id, ids))
+            distances = (result.get("distances") or [[]])[0]
+            relevant_ids = [
+                memory_id
+                for memory_id, distance in zip(ids, distances, strict=False)
+                if distance <= MAX_CONTEXTUAL_DISTANCE
+            ]
+            if relevant_ids:
+                memories.extend(self._get_many(user_id, relevant_ids))
         return memories
 
     def format_context(self, *, user_id: str, query: str) -> str:
@@ -355,7 +353,7 @@ class MemoryStore:
         return "\n".join(lines) or "No relevant saved memories."
 
     def rebuild_contextual_index(self) -> None:
-        """Repair missing or stale Chroma records from PostgreSQL."""
+        """Reconcile Chroma with PostgreSQL without re-embedding unchanged rows."""
         with self._pool.connection() as connection:
             rows = connection.execute(
                 """
@@ -363,9 +361,41 @@ class MemoryStore:
                 WHERE kind = 'contextual'
                 """
             ).fetchall()
-        for row in rows:
-            memory = _memory_from_row(row)
-            self._upsert_contextual(row["user_id"], memory)
+        expected = {
+            str(row["id"]): (row["user_id"], _memory_from_row(row))
+            for row in rows
+        }
+        indexed = self._collection.get(include=["metadatas"])
+        indexed_ids = indexed.get("ids") or []
+        indexed_metadata = indexed.get("metadatas") or []
+        metadata_by_id = dict(
+            zip(indexed_ids, indexed_metadata, strict=False)
+        )
+
+        orphaned_ids = [
+            memory_id
+            for memory_id in indexed_ids
+            if memory_id not in expected
+        ]
+        if orphaned_ids:
+            self._collection.delete(ids=orphaned_ids)
+
+        pending: list[tuple[str, MemoryView]] = []
+        for memory_id, (user_id, memory) in expected.items():
+            metadata = metadata_by_id.get(memory_id) or {}
+            if (
+                metadata.get("user_id") != user_id
+                or metadata.get("embedding_model")
+                != CONTEXTUAL_EMBEDDING_MODEL
+                or metadata.get("content_fingerprint")
+                != _content_fingerprint(memory.content)
+            ):
+                pending.append((user_id, memory))
+
+        for offset in range(0, len(pending), INDEX_BATCH_SIZE):
+            self._upsert_contextual_batch(
+                pending[offset : offset + INDEX_BATCH_SIZE]
+            )
 
     def _get_many(
         self,
@@ -384,11 +414,28 @@ class MemoryStore:
         return [by_id[memory_id] for memory_id in memory_ids if memory_id in by_id]
 
     def _upsert_contextual(self, user_id: str, memory: MemoryView) -> None:
+        self._upsert_contextual_batch([(user_id, memory)])
+
+    def _upsert_contextual_batch(
+        self,
+        records: list[tuple[str, MemoryView]],
+    ) -> None:
+        if not records:
+            return
         self._collection.upsert(
-            ids=[memory.id],
-            embeddings=[_embedding(memory.content)],
-            documents=[memory.content],
-            metadatas=[{"user_id": user_id, "kind": memory.kind}],
+            ids=[memory.id for _, memory in records],
+            documents=[memory.content for _, memory in records],
+            metadatas=[
+                {
+                    "user_id": user_id,
+                    "kind": memory.kind,
+                    "embedding_model": CONTEXTUAL_EMBEDDING_MODEL,
+                    "content_fingerprint": _content_fingerprint(
+                        memory.content
+                    ),
+                }
+                for user_id, memory in records
+            ],
         )
 
 

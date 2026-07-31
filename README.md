@@ -18,7 +18,8 @@ The project currently includes:
 - multi-turn conversations with immutable answer versions
 - supervisor-selected specialist reuse for efficient revisions
 - durable core preferences in PostgreSQL
-- relevant contextual-memory retrieval through ChromaDB
+- relevant contextual-memory retrieval through ChromaDB and local MiniLM
+  semantic embeddings
 - agent-managed durable-memory add, edit, and delete operations
 - transparent memory-mutation events in each task's workflow
 
@@ -146,8 +147,10 @@ into the new run.
 Writer Agent stores durable memories separately from LangGraph checkpoints.
 Bounded core writing preferences are read from PostgreSQL for every new run.
 Contextual facts and preferences are selected by vector similarity from the
-local ChromaDB index. Only the resulting bounded snapshot is passed into the
-workflow.
+local ChromaDB index using its local `all-MiniLM-L6-v2` embedding model.
+Retrieval applies a relevance cutoff, and only the resulting bounded snapshot
+is passed into the workflow. The model is downloaded once by ChromaDB and runs
+locally, so embedding does not incur per-request API charges.
 
 The app extracts only explicit, durable user-provided facts and recurring
 preferences. One-off task and revision instructions remain in conversation
@@ -155,8 +158,9 @@ context. The memory agent alone decides whether to add, edit, or delete a
 memory. Every successful mutation appears chronologically in the task's
 **Workflow** tab with the affected content. The sidebar’s read-only
 **Saved memory** section shows the current user’s stored memories without
-exposing mutation controls. PostgreSQL is authoritative; the ChromaDB index is
-rebuilt from it when the service starts.
+exposing mutation controls. PostgreSQL is authoritative. At startup, the app
+reconciles ChromaDB with PostgreSQL: it removes orphaned entries and embeds only
+missing, changed, or model-version-mismatched contextual memories.
 
 ## Test
 

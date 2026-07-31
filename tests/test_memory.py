@@ -13,7 +13,7 @@ from writer_agent.memory import (
     MemoryStore,
     MemoryView,
     ProposedMemoryOperation,
-    _embedding,
+    _content_fingerprint,
     manage_durable_memories,
     memory_events_for_mutations,
 )
@@ -246,12 +246,13 @@ class MemoryExtractionTests(unittest.TestCase):
 
 
 class MemoryContextTests(unittest.TestCase):
-    def test_local_embedding_is_normalized_and_deterministic(self):
-        first = _embedding("Product strategy for Acme")
-        second = _embedding("Product strategy for Acme")
+    def test_content_fingerprint_is_deterministic_and_content_sensitive(self):
+        first = _content_fingerprint("Product strategy for Acme")
+        second = _content_fingerprint("Product strategy for Acme")
+        changed = _content_fingerprint("Product strategy for Beta")
 
         self.assertEqual(first, second)
-        self.assertAlmostEqual(sum(value * value for value in first), 1.0)
+        self.assertNotEqual(first, changed)
 
     def test_context_is_bounded(self):
         now = datetime.now(UTC)
